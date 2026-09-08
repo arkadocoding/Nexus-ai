@@ -1,0 +1,21 @@
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+ENV/
+
+# Test / tooling
+.pytest_cache/
+.coverage
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
