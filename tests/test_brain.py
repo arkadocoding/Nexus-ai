@@ -8,45 +8,31 @@ from app.tools import CalculatorTool, ToolRegistry
 
 
 class FakeLLMClient:
-    """
-    Fake LLM client used for testing.
-
-    It simulates:
-    - normal LLM responses
-    - tool decisions
-    - final responses after tool execution
-    """
+    """Fake LLM client used for testing."""
 
     def __init__(self) -> None:
         self.calls: list[str] = []
 
     def generate(self, message: str) -> str:
-        """Return a predictable response for tests."""
+        """Return predictable responses for tests."""
 
         self.calls.append(message)
 
-        # Tool decision request
         if "Return ONLY valid JSON." in message:
-
-            # Only trigger the calculator when the
-            # actual user message is the math question.
             if "User message:\nWhat is 25 * 17?" in message:
                 return (
                     '{"tool": "calculator", '
                     '"arguments": {"expression": "25 * 17"}}'
                 )
 
-            # No tool required.
             return (
                 '{"tool": null, '
                 '"arguments": {}}'
             )
 
-        # Final response after tool execution.
         if "A tool was used." in message:
             return "The answer is 425."
 
-        # Normal response.
         return "Normal NEXUS response."
 
 
@@ -125,7 +111,8 @@ def test_calculator_rejects_unsupported_characters() -> None:
 
     assert (
         result
-        == "Error: expression contains unsupported characters."
+        == "Error: expression contains "
+        "unsupported characters."
     )
 
 
@@ -142,14 +129,7 @@ def test_tool_registry() -> None:
 
 
 def test_brain_uses_calculator() -> None:
-    """
-    Brain should:
-
-    1. Ask the LLM for a tool decision.
-    2. Execute the calculator.
-    3. Send the result back to the LLM.
-    4. Return the final response.
-    """
+    """Brain should execute the calculator when required."""
 
     fake_client = FakeLLMClient()
     brain = Brain(llm_client=fake_client)
@@ -160,14 +140,11 @@ def test_brain_uses_calculator() -> None:
 
     assert response == "The answer is 425."
 
-    # Verify that the decision engine was called.
     assert any(
         "Return ONLY valid JSON." in call
         for call in fake_client.calls
     )
 
-    # Verify that the calculator result
-    # reached the final LLM call.
     assert any(
         "425" in call
         for call in fake_client.calls
@@ -191,3 +168,79 @@ def test_unknown_tool_is_handled() -> None:
     )
 
     assert "does_not_exist" in result
+
+
+def test_invalid_tool_decision_is_rejected() -> None:
+    """Invalid tool decisions should become no-tool decisions."""
+
+    fake_client = FakeLLMClient()
+    brain = Brain(llm_client=fake_client)
+
+    decision = brain._validate_decision(
+        {
+            "tool": "does_not_exist",
+            "arguments": {},
+        }
+    )
+
+    assert decision == {
+        "tool": None,
+        "arguments": {},
+    }
+
+
+def test_invalid_arguments_are_rejected() -> None:
+    """Tool arguments must be a dictionary."""
+
+    fake_client = FakeLLMClient()
+    brain = Brain(llm_client=fake_client)
+
+    decision = brain._validate_decision(
+        {
+            "tool": "calculator",
+            "arguments": "25 * 17",
+        }
+    )
+
+    assert decision == {
+        "tool": None,
+        "arguments": {},
+    }
+
+
+def test_invalid_decision_format_is_rejected() -> None:
+    """Non-dictionary decisions should be rejected."""
+
+    fake_client = FakeLLMClient()
+    brain = Brain(llm_client=fake_client)
+
+    decision = brain._validate_decision(
+        "calculator"
+    )
+
+    assert decision == {
+        "tool": None,
+        "arguments": {},
+    }
+
+
+def test_calculator_handles_missing_expression() -> None:
+    """Calculator should handle missing expressions."""
+
+    calculator = CalculatorTool()
+
+    result = calculator.execute()
+
+    assert result == "Error: expression is required."
+
+
+def test_calculator_handles_division_by_zero() -> None:
+    """Calculator should safely handle division by zero."""
+
+    calculator = CalculatorTool()
+
+    result = calculator.execute(
+        expression="10 / 0"
+    )
+
+    assert result == "Error: division by zero."
