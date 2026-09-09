@@ -3,12 +3,17 @@ brain.py
 
 The core orchestration logic for NEXUS.
 
-V3 includes:
-- conversation memory
-- tool registry
-- structured tool decisions
-- decision validation
-- safe tool execution
+V4 introduces the first agent loop:
+
+UNDERSTAND
+    ↓
+DECIDE
+    ↓
+ACT
+    ↓
+OBSERVE
+    ↓
+RESPOND
 """
 
 import json
@@ -20,13 +25,14 @@ from app.tools import ToolRegistry, create_default_registry
 
 class Brain:
     """
-    The thinking/orchestration layer of NEXUS.
+    The thinking and orchestration layer of NEXUS.
 
     Brain manages:
     - conversation memory
     - LLM communication
     - tool selection
     - tool execution
+    - agent loop
     """
 
     def __init__(
@@ -51,23 +57,26 @@ class Brain:
 
     def handle_message(self, user_message: str) -> str:
         """
-        Handle one user message.
+        Run one NEXUS agent cycle.
 
         Flow:
 
         User
           ↓
-        Memory
+        UNDERSTAND
           ↓
-        Decide
-        ↙     ↘
-      normal  tool
-        ↓      ↓
-       LLM   execute
-              ↓
-             LLM
-              ↓
-           response
+        DECIDE
+          ↓
+        ┌──────────────┐
+        │              │
+        normal        tool
+        │              │
+        ↓              ↓
+      RESPOND        ACT
+                       ↓
+                    OBSERVE
+                       ↓
+                    RESPOND
         """
 
         self.memory.add(
@@ -78,7 +87,7 @@ class Brain:
         decision = self._decide(user_message)
 
         if decision["tool"] is not None:
-            response = self._execute_tool(
+            response = self._act_and_observe(
                 decision["tool"],
                 decision["arguments"],
             )
@@ -97,10 +106,7 @@ class Brain:
         user_message: str,
     ) -> dict[str, Any]:
         """
-        Ask the LLM whether a tool is required.
-
-        The decision is validated before it can
-        reach the tool execution layer.
+        Decide whether NEXUS should use a tool.
         """
 
         tools = self.tools.list_tools()
@@ -126,6 +132,7 @@ Decide whether NEXUS needs a tool.
 Return ONLY valid JSON.
 
 If a tool is needed:
+
 {{
     "tool": "tool_name",
     "arguments": {{
@@ -134,6 +141,7 @@ If a tool is needed:
 }}
 
 If no tool is needed:
+
 {{
     "tool": null,
     "arguments": {{}}
@@ -142,9 +150,11 @@ If no tool is needed:
 For mathematical calculations, use the calculator tool.
 
 Example:
+
 User: What is 25 * 17?
 
 Return:
+
 {{
     "tool": "calculator",
     "arguments": {{
@@ -171,30 +181,26 @@ Return:
     ) -> dict[str, Any]:
         """
         Validate an LLM-generated tool decision.
-
-        Invalid decisions safely become a normal
-        response instead of reaching tool execution.
         """
 
         if not isinstance(decision, dict):
             return self._empty_decision()
 
         tool_name = decision.get("tool")
-        arguments = decision.get("arguments", {})
+        arguments = decision.get(
+            "arguments",
+            {},
+        )
 
-        # No tool requested.
         if tool_name is None:
             return self._empty_decision()
 
-        # Tool name must be a string.
         if not isinstance(tool_name, str):
             return self._empty_decision()
 
-        # Arguments must be a dictionary.
         if not isinstance(arguments, dict):
             return self._empty_decision()
 
-        # Tool must actually exist.
         tool = self.tools.get(tool_name)
 
         if tool is None:
@@ -207,8 +213,7 @@ Return:
 
     def _empty_decision(self) -> dict[str, Any]:
         """
-        Return a safe decision meaning:
-        no tool should be used.
+        Return a safe no-tool decision.
         """
 
         return {
@@ -216,14 +221,20 @@ Return:
             "arguments": {},
         }
 
-    def _execute_tool(
+    def _act_and_observe(
         self,
         tool_name: str,
         arguments: dict[str, Any],
     ) -> str:
         """
-        Execute a validated tool and send its result
-        back to the LLM.
+        ACT:
+
+        Execute the selected tool.
+
+        OBSERVE:
+
+        Capture the tool result and give it
+        back to the LLM so NEXUS can respond.
         """
 
         tool = self.tools.get(tool_name)
@@ -235,7 +246,9 @@ Return:
             )
 
         try:
-            result = tool.execute(**arguments)
+            result = tool.execute(
+                **arguments
+            )
 
         except TypeError as error:
             return (
@@ -248,6 +261,21 @@ Return:
                 f"Tool execution failed: {error}"
             )
 
+        return self._respond_after_tool(
+            tool_name,
+            result,
+        )
+
+    def _respond_after_tool(
+        self,
+        tool_name: str,
+        tool_result: Any,
+    ) -> str:
+        """
+        Convert an observed tool result into
+        a natural final response.
+        """
+
         context = self._build_context()
 
         final_prompt = f"""
@@ -256,15 +284,17 @@ You are NEXUS.
 Conversation:
 {context}
 
-A tool was used.
+Agent observation:
 
-Tool:
+Tool used:
 {tool_name}
 
 Tool result:
-{result}
+{tool_result}
 
-Answer the user's original question naturally.
+Use the observation to answer the user's
+original question naturally.
+
 Do not mention internal implementation details
 unless the user asks.
 """
@@ -283,7 +313,7 @@ unless the user asks.
 
     def _generate_response(self) -> str:
         """
-        Generate a normal response without a tool.
+        Generate a normal response without tools.
         """
 
         context = self._build_context()
