@@ -1,33 +1,34 @@
 """
 planner.py
 
-Planning system for NEXUS.
+Planning layer for NEXUS.
 
-The planner converts a user request into a
-structured sequence of steps before execution.
+The Planner decides WHAT needs to happen.
+The Brain decides HOW to execute those steps.
 """
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 from typing import Any
 
 
 @dataclass
 class PlanStep:
-    """Represents one step in a NEXUS plan."""
+    """One step in a NEXUS execution plan."""
 
     description: str
     tool: str | None = None
-    arguments: dict[str, Any] | None = None
+    arguments: dict[str, Any] = field(
+        default_factory=dict
+    )
 
 
 class Planner:
     """
-    Creates execution plans for NEXUS.
+    Creates structured execution plans.
 
-    V1 of the planner is intentionally simple.
-
-    The LLM decides the high-level plan while
-    the Brain remains responsible for execution.
+    The planner does not execute tools.
+    It only decides the sequence of actions.
     """
 
     def __init__(self, llm_client: Any) -> None:
@@ -36,48 +37,41 @@ class Planner:
     def create_plan(
         self,
         user_message: str,
+        available_tools: list[Any],
     ) -> list[PlanStep]:
-        """
-        Ask the LLM to create a structured plan.
-        """
+        """Create a plan for the user's request."""
+
+        tool_descriptions = []
+
+        for tool in available_tools:
+            tool_descriptions.append(
+                f"- {tool.name}: {tool.description}"
+            )
 
         prompt = f"""
-You are the planning system for NEXUS.
+You are the planning engine for NEXUS.
 
-Your job is to break the user's request into
-clear, actionable steps.
+Your job is to create an execution plan.
+
+Available tools:
+{chr(10).join(tool_descriptions)}
 
 User request:
 {user_message}
 
-Create a short plan.
+Create the smallest useful sequence of steps
+needed to solve the user's request.
 
-Rules:
-- Use only the number of steps actually needed.
-- Keep steps specific and actionable.
-- Do not perform the task.
-- Do not invent tools.
-- If the request is simple, use one step.
-- If no tool is required, tool should be null.
+Each step must contain:
+
+- description
+- tool
+- arguments
+
+Use "tool": null when a step does not need
+a tool.
 
 Return ONLY valid JSON in this format:
-
-{{
-    "steps": [
-        {{
-            "description": "step description",
-            "tool": null,
-            "arguments": {{}}
-        }}
-    ]
-}}
-
-Example:
-
-User request:
-What is 25 * 17?
-
-Return:
 
 {{
     "steps": [
@@ -90,6 +84,14 @@ Return:
         }}
     ]
 }}
+
+Rules:
+
+1. Do not invent tools.
+2. Use available tools when appropriate.
+3. Keep the plan as short as possible.
+4. A later step may depend on an earlier step's result.
+5. Do not execute anything yourself.
 """
 
         try:
@@ -97,58 +99,64 @@ Return:
                 prompt
             )
 
-            return self._parse_plan(raw_plan)
+            data = json.loads(raw_plan)
 
-        except Exception:
-            return [
-                PlanStep(
-                    description=user_message
-                )
-            ]
+        except (
+            json.JSONDecodeError,
+            TypeError,
+        ):
+            return self._fallback_plan(
+                user_message
+            )
+
+        return self._parse_plan(
+            data,
+            available_tools,
+            user_message,
+        )
 
     def _parse_plan(
         self,
-        raw_plan: str,
+        data: Any,
+        available_tools: list[Any],
+        user_message: str,
     ) -> list[PlanStep]:
-        """
-        Parse the LLM-generated plan.
-
-        Parsing is isolated from execution so the
-        Brain never executes raw LLM output directly.
-        """
-
-        import json
-
-        data = json.loads(raw_plan)
+        """Validate and convert raw planner output."""
 
         if not isinstance(data, dict):
-            raise ValueError(
-                "Plan must be a JSON object."
+            return self._fallback_plan(
+                user_message
             )
 
-        steps = data.get("steps")
+        raw_steps = data.get("steps")
 
-        if not isinstance(steps, list):
-            raise ValueError(
-                "Plan steps must be a list."
+        if not isinstance(raw_steps, list):
+            return self._fallback_plan(
+                user_message
             )
 
-        parsed_steps: list[PlanStep] = []
+        available_names = {
+            tool.name
+            for tool in available_tools
+        }
 
-        for step in steps:
-            if not isinstance(step, dict):
+        steps: list[PlanStep] = []
+
+        for raw_step in raw_steps:
+            if not isinstance(
+                raw_step,
+                dict,
+            ):
                 continue
 
-            description = step.get(
+            description = raw_step.get(
                 "description",
                 "",
             )
 
-            tool = step.get(
-                "tool"
-            )
+            tool = raw_step.get("tool")
 
-            arguments = step.get(
+            arguments = raw_step.get(
                 "arguments",
                 {},
             )
@@ -159,19 +167,20 @@ Return:
             ):
                 continue
 
+            if tool is not None:
+                if not isinstance(tool, str):
+                    continue
+
+                if tool not in available_names:
+                    continue
+
             if not isinstance(
                 arguments,
                 dict,
             ):
-                arguments = {}
+                continue
 
-            if tool is not None and not isinstance(
-                tool,
-                str,
-            ):
-                tool = None
-
-            parsed_steps.append(
+            steps.append(
                 PlanStep(
                     description=description,
                     tool=tool,
@@ -179,9 +188,25 @@ Return:
                 )
             )
 
-        if not parsed_steps:
-            raise ValueError(
-                "Plan contains no valid steps."
+        if not steps:
+            return self._fallback_plan(
+                user_message
             )
 
-        return parsed_steps
+        return steps
+
+    def _fallback_plan(
+        self,
+        user_message: str,
+    ) -> list[PlanStep]:
+        """Create a safe no-tool fallback plan."""
+
+        return [
+            PlanStep(
+                description=(
+                    "Answer the user's request directly."
+                ),
+                tool=None,
+                arguments={},
+            )
+        ]
