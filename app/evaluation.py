@@ -64,7 +64,7 @@ class Evaluator:
         return Evaluation(
             success=True,
             reason=(
-                "All executed steps completed."
+                "all executed steps completed."
             ),
             recoverable=False,
             step=latest.step,
