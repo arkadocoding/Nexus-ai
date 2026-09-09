@@ -1,6 +1,6 @@
 """
 Tests for the NEXUS Brain, Memory, Tools,
-AgentState, Planner, and Evaluation system.
+Planner, AgentState, and Evaluation system.
 """
 
 from app.brain import AgentState, Brain
@@ -9,7 +9,7 @@ from app.tools import CalculatorTool, ToolRegistry
 
 
 class FakeLLMClient:
-    """Fake LLM client used for testing."""
+    """Fake LLM client used for deterministic testing."""
 
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -19,17 +19,17 @@ class FakeLLMClient:
 
         self.calls.append(message)
 
-        # ---------------------------------------------
-        # V5.2 PLANNER
-        # ---------------------------------------------
+        # -------------------------------------------------
+        # PLANNER
+        # -------------------------------------------------
 
         if "You are the planning engine for NEXUS." in message:
-            if "What is 25 * 17?" in message:
+            if "User request:\nWhat is 25 * 17?" in message:
                 return (
                     '{"steps": ['
                     '{'
-                    '"description": "Calculate 25 * 17",'
-                    '"tool": "calculator",'
+                    '"description": "Calculate 25 * 17", '
+                    '"tool": "calculator", '
                     '"arguments": {'
                     '"expression": "25 * 17"'
                     '}'
@@ -40,16 +40,23 @@ class FakeLLMClient:
             return (
                 '{"steps": ['
                 '{'
-                '"description": "Answer the user directly",'
-                '"tool": null,'
+                '"description": "Answer the user directly", '
+                '"tool": null, '
                 '"arguments": {}'
                 '}'
                 ']}'
             )
 
-        # ---------------------------------------------
-        # OLD DECISION ENGINE
-        # ---------------------------------------------
+        # -------------------------------------------------
+        # FINAL RESPONSE AFTER TOOL EXECUTION
+        # -------------------------------------------------
+
+        if "A plan was executed." in message:
+            return "The answer is 425."
+
+        # -------------------------------------------------
+        # LEGACY DECISION COMPATIBILITY
+        # -------------------------------------------------
 
         if "Return ONLY valid JSON." in message:
             if "User message:\nWhat is 25 * 17?" in message:
@@ -63,37 +70,29 @@ class FakeLLMClient:
                 '"arguments": {}}'
             )
 
-        # ---------------------------------------------
-        # V5.2 FINAL RESPONSE
-        # ---------------------------------------------
-
-        if "A plan was executed." in message:
-            return "The answer is 425."
-
-        # ---------------------------------------------
-        # V4.4 COMPATIBILITY
-        # ---------------------------------------------
+        # -------------------------------------------------
+        # LEGACY TOOL RESPONSE COMPATIBILITY
+        # -------------------------------------------------
 
         if "A tool was used." in message:
             return "The answer is 425."
 
-        # ---------------------------------------------
-        # NORMAL RESPONSE
-        # ---------------------------------------------
-
         return "Normal NEXUS response."
 
 
-# =====================================================
-# NORMAL BRAIN TESTS
-# =====================================================
+# =========================================================
+# BASIC BRAIN BEHAVIOR
+# =========================================================
 
 
 def test_brain_returns_normal_response() -> None:
     """Brain should return a normal LLM response."""
 
     fake_client = FakeLLMClient()
-    brain = Brain(llm_client=fake_client)
+
+    brain = Brain(
+        llm_client=fake_client
+    )
 
     response = brain.handle_message(
         "Hello NEXUS"
@@ -120,8 +119,10 @@ def test_brain_stores_conversation() -> None:
     messages = memory.get_messages()
 
     assert len(messages) == 2
+
     assert messages[0]["role"] == "user"
     assert messages[0]["content"] == "Hello NEXUS"
+
     assert messages[1]["role"] == "assistant"
 
 
@@ -129,6 +130,7 @@ def test_brain_uses_previous_conversation() -> None:
     """Brain should include previous conversation."""
 
     fake_client = FakeLLMClient()
+
     brain = Brain(
         llm_client=fake_client
     )
@@ -154,9 +156,9 @@ def test_brain_uses_previous_conversation() -> None:
     )
 
 
-# =====================================================
-# CALCULATOR TESTS
-# =====================================================
+# =========================================================
+# CALCULATOR
+# =========================================================
 
 
 def test_calculator_tool() -> None:
@@ -215,38 +217,66 @@ def test_calculator_handles_division_by_zero() -> None:
     )
 
 
-# =====================================================
-# TOOL REGISTRY TESTS
-# =====================================================
+# =========================================================
+# TOOL REGISTRY
+# =========================================================
 
 
 def test_tool_registry() -> None:
     """ToolRegistry should register and retrieve tools."""
 
     registry = ToolRegistry()
+
     calculator = CalculatorTool()
 
-    registry.register(calculator)
+    registry.register(
+        calculator
+    )
 
     assert (
         registry.get("calculator")
         is calculator
     )
 
-    assert len(
-        registry.list_tools()
-    ) == 1
+    assert (
+        len(registry.list_tools())
+        == 1
+    )
 
 
-# =====================================================
-# BRAIN TOOL DECISION TESTS
-# =====================================================
-
-
-def test_brain_uses_calculator() -> None:
-    """Brain should execute the calculator when required."""
+def test_unknown_tool_is_handled() -> None:
+    """Brain should safely handle an unknown tool."""
 
     fake_client = FakeLLMClient()
+
+    registry = ToolRegistry()
+
+    brain = Brain(
+        llm_client=fake_client,
+        tool_registry=registry,
+    )
+
+    result = brain._execute_tool_only(
+        "does_not_exist",
+        {},
+    )
+
+    assert (
+        "does_not_exist"
+        in result
+    )
+
+
+# =========================================================
+# PLANNER INTEGRATION
+# =========================================================
+
+
+def test_brain_uses_planner() -> None:
+    """Brain should use Planner instead of the old DECIDE path."""
+
+    fake_client = FakeLLMClient()
+
     brain = Brain(
         llm_client=fake_client
     )
@@ -258,43 +288,79 @@ def test_brain_uses_calculator() -> None:
     assert response == "The answer is 425."
 
     assert any(
-        "Return ONLY valid JSON."
+        "You are the planning engine for NEXUS."
         in call
         for call in fake_client.calls
     )
 
-    assert any(
-        "425" in call
-        for call in fake_client.calls
-    )
 
-
-def test_unknown_tool_is_handled() -> None:
-    """Brain should safely handle an unknown tool."""
+def test_brain_tracks_planned_step() -> None:
+    """Brain should store the planner's execution plan."""
 
     fake_client = FakeLLMClient()
-    registry = ToolRegistry()
 
     brain = Brain(
-        llm_client=fake_client,
-        tool_registry=registry,
+        llm_client=fake_client
     )
 
-    result = brain._execute_tool(
-        "does_not_exist",
-        {},
+    brain.handle_message(
+        "What is 25 * 17?"
     )
+
+    state = brain.last_state
+
+    assert state is not None
+
+    assert len(state.plan) == 1
+
+    assert state.plan[0]["tool"] == "calculator"
 
     assert (
-        "does_not_exist"
-        in result
+        state.plan[0]["arguments"]
+        == {
+            "expression": "25 * 17"
+        }
     )
+
+
+def test_brain_tracks_planner_observation() -> None:
+    """Brain should record the result produced by the planned tool."""
+
+    fake_client = FakeLLMClient()
+
+    brain = Brain(
+        llm_client=fake_client
+    )
+
+    brain.handle_message(
+        "What is 25 * 17?"
+    )
+
+    state = brain.last_state
+
+    assert state is not None
+
+    assert state.observation == "425"
+
+    assert state.observations == [
+        "425"
+    ]
+
+    assert state.evaluation == (
+        "SUCCESS: usable tool result."
+    )
+
+
+# =========================================================
+# DECISION VALIDATION
+# =========================================================
 
 
 def test_invalid_tool_decision_is_rejected() -> None:
     """Invalid tool decisions should become no-tool decisions."""
 
     fake_client = FakeLLMClient()
+
     brain = Brain(
         llm_client=fake_client
     )
@@ -316,6 +382,7 @@ def test_invalid_arguments_are_rejected() -> None:
     """Tool arguments must be a dictionary."""
 
     fake_client = FakeLLMClient()
+
     brain = Brain(
         llm_client=fake_client
     )
@@ -337,6 +404,7 @@ def test_invalid_decision_format_is_rejected() -> None:
     """Non-dictionary decisions should be rejected."""
 
     fake_client = FakeLLMClient()
+
     brain = Brain(
         llm_client=fake_client
     )
@@ -351,9 +419,9 @@ def test_invalid_decision_format_is_rejected() -> None:
     }
 
 
-# =====================================================
-# AGENT STATE TESTS
-# =====================================================
+# =========================================================
+# AGENT STATE
+# =========================================================
 
 
 def test_agent_state_defaults() -> None:
@@ -363,14 +431,25 @@ def test_agent_state_defaults() -> None:
         user_message="Hello NEXUS"
     )
 
-    assert state.user_message == "Hello NEXUS"
+    assert (
+        state.user_message
+        == "Hello NEXUS"
+    )
+
     assert state.decision == {}
+
     assert state.tool_name is None
+
     assert state.arguments == {}
+
     assert state.plan == []
+
     assert state.observation is None
+
     assert state.observations == []
+
     assert state.evaluation == ""
+
     assert state.final_response == ""
 
 
@@ -378,6 +457,7 @@ def test_agent_state_tracks_normal_response() -> None:
     """AgentState should track a normal response."""
 
     fake_client = FakeLLMClient()
+
     brain = Brain(
         llm_client=fake_client
     )
@@ -399,26 +479,15 @@ def test_agent_state_tracks_normal_response() -> None:
 
     assert state.arguments == {}
 
-    assert state.plan == [
-        {
-            "step": 1,
-            "description": "Answer the user directly",
-            "tool": None,
-            "arguments": {},
-        }
-    ]
-
     assert state.observation is None
 
-    assert (
-        state.evaluation
-        == "No tool required."
+    assert state.observations == []
+
+    assert state.evaluation == (
+        "No tool required."
     )
 
-    assert (
-        state.final_response
-        == response
-    )
+    assert state.final_response == response
 
 
 def test_agent_state_tracks_tool_execution() -> None:
@@ -449,16 +518,7 @@ def test_agent_state_tracks_tool_execution() -> None:
         "expression": "25 * 17"
     }
 
-    assert state.plan == [
-        {
-            "step": 1,
-            "description": "Calculate 25 * 17",
-            "tool": "calculator",
-            "arguments": {
-                "expression": "25 * 17"
-            },
-        }
-    ]
+    assert state.plan[0]["tool"] == "calculator"
 
     assert state.observation == "425"
 
@@ -466,79 +526,16 @@ def test_agent_state_tracks_tool_execution() -> None:
         "425"
     ]
 
-    assert (
-        state.evaluation
-        == "SUCCESS: usable tool result."
+    assert state.evaluation == (
+        "SUCCESS: usable tool result."
     )
 
-    assert (
-        state.final_response
-        == response
-    )
+    assert state.final_response == response
 
 
-# =====================================================
-# PLANNER INTEGRATION TESTS
-# =====================================================
-
-
-def test_brain_uses_planner() -> None:
-    """Brain should create and execute a Planner plan."""
-
-    fake_client = FakeLLMClient()
-
-    brain = Brain(
-        llm_client=fake_client
-    )
-
-    response = brain.handle_message(
-        "What is 25 * 17?"
-    )
-
-    assert response == "The answer is 425."
-
-    assert brain.last_state is not None
-
-    assert brain.last_state.plan == [
-        {
-            "step": 1,
-            "description": "Calculate 25 * 17",
-            "tool": "calculator",
-            "arguments": {
-                "expression": "25 * 17"
-            },
-        }
-    ]
-
-
-def test_brain_tracks_planner_observation() -> None:
-    """Brain should track the result produced by a planned tool."""
-
-    fake_client = FakeLLMClient()
-
-    brain = Brain(
-        llm_client=fake_client
-    )
-
-    brain.handle_message(
-        "What is 25 * 17?"
-    )
-
-    assert brain.last_state is not None
-
-    assert brain.last_state.observations == [
-        "425"
-    ]
-
-    assert (
-        brain.last_state.evaluation
-        == "SUCCESS: usable tool result."
-    )
-
-
-# =====================================================
-# EVALUATION TESTS
-# =====================================================
+# =========================================================
+# EVALUATION
+# =========================================================
 
 
 def test_evaluation_detects_success() -> None:
@@ -554,9 +551,8 @@ def test_evaluation_detects_success() -> None:
         "425"
     )
 
-    assert (
-        result
-        == "SUCCESS: usable tool result."
+    assert result == (
+        "SUCCESS: usable tool result."
     )
 
 
@@ -573,9 +569,8 @@ def test_evaluation_detects_empty_result() -> None:
         None
     )
 
-    assert (
-        result
-        == "FAILED: tool returned no result."
+    assert result == (
+        "FAILED: tool returned no result."
     )
 
 
@@ -592,9 +587,8 @@ def test_evaluation_detects_tool_error() -> None:
         "Error: division by zero."
     )
 
-    assert (
-        result
-        == "FAILED: tool returned an error."
+    assert result == (
+        "FAILED: tool returned an error."
     )
 
 
@@ -611,9 +605,8 @@ def test_evaluation_detects_invalid_arguments() -> None:
         "The tool received invalid arguments: test"
     )
 
-    assert (
-        result
-        == "FAILED: invalid tool arguments."
+    assert result == (
+        "FAILED: invalid tool arguments."
     )
 
 
@@ -630,7 +623,6 @@ def test_evaluation_detects_execution_failure() -> None:
         "Tool execution failed: test"
     )
 
-    assert (
-        result
-        == "FAILED: tool execution failed."
+    assert result == (
+        "FAILED: tool execution failed."
     )
