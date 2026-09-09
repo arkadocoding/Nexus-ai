@@ -1,16 +1,13 @@
 """
 brain.py
 
-The core orchestration logic of NEXUS.
+The core orchestration logic for NEXUS.
 
-V5.1 keeps the stable V4.4 architecture while introducing
-execution-plan tracking.
+V5.2 introduces real Planner integration.
 
 Flow:
 
 UNDERSTAND
-    ↓
-DECIDE
     ↓
 PLAN
     ↓
@@ -28,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.memory import Memory
+from app.planner import Planner
 from app.tools import ToolRegistry, create_default_registry
 
 
@@ -36,8 +34,8 @@ class AgentState:
     """
     Stores the state of one NEXUS agent execution.
 
-    V5.1 keeps the V4.4 fields for compatibility and adds
-    a plan field for future multi-step reasoning.
+    V5.2 keeps the existing fields for compatibility
+    and tracks the real execution plan and observations.
     """
 
     user_message: str
@@ -70,6 +68,9 @@ class AgentState:
 class Brain:
     """
     The thinking and orchestration layer of NEXUS.
+
+    Brain decides HOW to execute the plan.
+    Planner decides WHAT needs to happen.
     """
 
     def __init__(
@@ -90,6 +91,10 @@ class Brain:
             tool_registry
             if tool_registry is not None
             else create_default_registry()
+        )
+
+        self.planner = Planner(
+            llm_client
         )
 
         self.last_state: AgentState | None = None
@@ -114,50 +119,93 @@ class Brain:
         )
 
         # -------------------------------------------------
-        # UNDERSTAND + DECIDE
+        # PLAN
         # -------------------------------------------------
 
-        decision = self._decide(
-            user_message
+        plan_steps = self.planner.create_plan(
+            user_message,
+            self.tools.list_tools(),
         )
 
-        state.decision = decision
-
-        state.tool_name = decision["tool"]
-
-        state.arguments = decision[
-            "arguments"
+        state.plan = [
+            {
+                "step": index,
+                "description": step.description,
+                "tool": step.tool,
+                "arguments": step.arguments,
+            }
+            for index, step in enumerate(
+                plan_steps,
+                start=1,
+            )
         ]
 
         # -------------------------------------------------
-        # PLAN
-        #
-        # V5.1 introduces explicit plan tracking.
-        # For now the plan is generated from the validated
-        # decision. Later this becomes a true multi-step
-        # LLM planner.
+        # COMPATIBILITY DECISION
         # -------------------------------------------------
 
-        state.plan = self._build_plan(
-            decision
+        first_tool_step = next(
+            (
+                step
+                for step in plan_steps
+                if step.tool is not None
+            ),
+            None,
         )
 
-        # -------------------------------------------------
-        # ACT
-        # -------------------------------------------------
+        if first_tool_step is None:
+            decision = self._empty_decision()
 
-        if decision["tool"] is not None:
-            response = self._execute_tool(
-                decision["tool"],
-                decision["arguments"],
-            )
+            state.decision = decision
+            state.tool_name = None
+            state.arguments = {}
 
-        else:
             state.evaluation = (
                 "No tool required."
             )
 
             response = self._generate_response()
+
+        else:
+            decision = {
+                "tool": first_tool_step.tool,
+                "arguments": first_tool_step.arguments,
+            }
+
+            state.decision = decision
+            state.tool_name = first_tool_step.tool
+            state.arguments = (
+                first_tool_step.arguments
+            )
+
+            # -------------------------------------------------
+            # ACT + OBSERVE + EVALUATE
+            # -------------------------------------------------
+
+            for step in plan_steps:
+                if step.tool is None:
+                    continue
+
+                self._execute_tool_only(
+                    step.tool,
+                    step.arguments,
+                )
+
+            # Use the final observation to generate
+            # the final natural-language response.
+
+            final_tool = first_tool_step.tool
+
+            final_result = (
+                state.observations[-1]
+                if state.observations
+                else None
+            )
+
+            response = self._respond_after_tool(
+                final_tool,
+                final_result,
+            )
 
         # -------------------------------------------------
         # FINAL RESPONSE
@@ -172,68 +220,71 @@ class Brain:
 
         return response
 
-    def _build_plan(
+    def _execute_tool_only(
         self,
-        decision: dict[str, Any],
-    ) -> list[dict[str, Any]]:
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> Any:
         """
-        Build an execution plan from a validated decision.
+        Execute one planned tool step.
 
-        V5.1 starts with a single-step plan.
+        This method performs:
 
-        Example:
-
-        {
-            "tool": "calculator",
-            "arguments": {
-                "expression": "25 * 17"
-            }
-        }
-
-        becomes:
-
-        [
-            {
-                "step": 1,
-                "tool": "calculator",
-                "arguments": {
-                    "expression": "25 * 17"
-                }
-            }
-        ]
-
-        This gives NEXUS an explicit plan representation
-        without breaking the existing decision system.
-
-        Multi-step planning will be added on top of this
-        foundation.
+        ACT
+        ↓
+        OBSERVE
+        ↓
+        EVALUATE
         """
 
-        if decision["tool"] is None:
-            return [
-                {
-                    "step": 1,
-                    "tool": None,
-                    "arguments": {},
-                }
-            ]
+        tool = self.tools.get(
+            tool_name
+        )
 
-        return [
-            {
-                "step": 1,
-                "tool": decision["tool"],
-                "arguments": decision[
-                    "arguments"
-                ],
-            }
-        ]
+        if tool is None:
+            result = (
+                f"NEXUS does not have a tool named "
+                f"'{tool_name}'."
+            )
+
+            self._record_observation(
+                result
+            )
+
+            return result
+
+        try:
+            result = tool.execute(
+                **arguments
+            )
+
+        except TypeError as error:
+            result = (
+                "The tool received invalid arguments: "
+                f"{error}"
+            )
+
+        except Exception as error:
+            result = (
+                f"Tool execution failed: {error}"
+            )
+
+        self._record_observation(
+            result
+        )
+
+        return result
 
     def _decide(
         self,
         user_message: str,
     ) -> dict[str, Any]:
         """
-        Decide whether NEXUS should use a tool.
+        Compatibility decision method.
+
+        The real planning path is now handled by Planner.
+        This method remains available for existing tests
+        and older code.
         """
 
         tools = self.tools.list_tools()
@@ -275,19 +326,6 @@ If no tool is needed:
 }}
 
 For mathematical calculations, use the calculator tool.
-
-Example:
-
-User: What is 25 * 17?
-
-Return:
-
-{{
-    "tool": "calculator",
-    "arguments": {{
-        "expression": "25 * 17"
-    }}
-}}
 """
 
         try:
@@ -377,54 +415,12 @@ Return:
         arguments: dict[str, Any],
     ) -> str:
         """
-        ACT:
-
-        Execute the selected tool.
-
-        OBSERVE:
-
-        Store the tool result.
-
-        EVALUATE:
-
-        Check whether the tool execution
-        produced a usable result.
+        Compatibility wrapper for the existing API.
         """
 
-        tool = self.tools.get(
-            tool_name
-        )
-
-        if tool is None:
-            result = (
-                f"NEXUS does not have a tool named "
-                f"'{tool_name}'."
-            )
-
-            self._record_observation(
-                result
-            )
-
-            return result
-
-        try:
-            result = tool.execute(
-                **arguments
-            )
-
-        except TypeError as error:
-            result = (
-                "The tool received invalid arguments: "
-                f"{error}"
-            )
-
-        except Exception as error:
-            result = (
-                f"Tool execution failed: {error}"
-            )
-
-        self._record_observation(
-            result
+        result = self._execute_tool_only(
+            tool_name,
+            arguments,
         )
 
         return self._respond_after_tool(
@@ -459,9 +455,6 @@ Return:
     ) -> str:
         """
         Evaluate a tool result locally.
-
-        V5.1 keeps deterministic evaluation.
-        A smarter evaluator will be introduced later.
         """
 
         if result is None:
@@ -499,8 +492,7 @@ Return:
         tool_result: Any,
     ) -> str:
         """
-        Convert the observed and evaluated tool
-        result into a natural final response.
+        Convert observations into the final response.
         """
 
         context = self._build_context()
@@ -512,19 +504,29 @@ Return:
                 self.last_state.evaluation
             )
 
+        observations = []
+
+        if self.last_state is not None:
+            observations = (
+                self.last_state.observations
+            )
+
         final_prompt = f"""
 You are NEXUS.
 
 Conversation:
 {context}
 
-A tool was used.
+A plan was executed.
 
 Tool:
 {tool_name}
 
-Tool result:
+Latest tool result:
 {tool_result}
+
+All observations:
+{observations}
 
 Evaluation:
 {evaluation}
