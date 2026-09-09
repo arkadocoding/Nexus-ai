@@ -3,27 +3,29 @@ brain.py
 
 The core orchestration logic for NEXUS.
 
-V5.4 introduces the real execution architecture.
+V5.5B introduces structured evaluation.
 
 Flow:
 
-UNDERSTAND
-    ↓
-PLAN
-    ↓
-EXECUTE
-    ↓
-OBSERVE
-    ↓
-EVALUATE
-    ↓
-RESPOND
+    UNDERSTAND
+        ↓
+      PLAN
+        ↓
+     EXECUTE
+        ↓
+     OBSERVE
+        ↓
+    EVALUATE
+        ↓
+     RESPOND
 
 Brain coordinates the system.
 
 Planner decides WHAT should happen.
 
 Executor carries out the plan.
+
+Evaluator judges the execution result.
 
 Tools perform the actual actions.
 """
@@ -32,6 +34,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.evaluation import Evaluation, Evaluator
 from app.executor import ExecutionRecord, Executor
 from app.memory import Memory
 from app.planner import Planner
@@ -46,8 +49,8 @@ class AgentState:
     """
     Stores the state of one NEXUS execution.
 
-    V5.4 adds execution_history so the Brain can
-    expose what the Executor actually did.
+    V5.5B adds structured evaluation while
+    preserving the existing execution history.
     """
 
     user_message: str
@@ -96,6 +99,9 @@ class Brain:
     Executor:
         Executes the plan.
 
+    Evaluator:
+        Evaluates execution results.
+
     Tools:
         Perform individual capabilities.
     """
@@ -128,6 +134,11 @@ class Brain:
             self.tools
         )
 
+        # V5.5B:
+        # Evaluator now becomes part of the
+        # real Brain execution pipeline.
+        self.evaluator = Evaluator()
+
         self.last_state: AgentState | None = None
 
     def handle_message(
@@ -137,7 +148,7 @@ class Brain:
         """
         Run one complete NEXUS agent cycle.
 
-        V5.4:
+        V5.5B:
 
         User
         ↓
@@ -146,6 +157,8 @@ class Brain:
         Executor
         ↓
         Observations
+        ↓
+        Evaluator
         ↓
         Response
         """
@@ -237,13 +250,10 @@ class Brain:
             # =================================================
             # EXECUTOR
             # =================================================
-            #
-            # IMPORTANT:
-            #
-            # Brain no longer executes tools itself.
+
+            # Brain does NOT execute tools itself.
             #
             # Executor owns execution.
-            #
 
             history = (
                 self.executor.execute_plan(
@@ -254,6 +264,24 @@ class Brain:
             self._record_execution_history(
                 history
             )
+
+            # =================================================
+            # EVALUATOR
+            # =================================================
+
+            evaluation = (
+                self.evaluator.evaluate(
+                    history
+                )
+            )
+
+            self._record_evaluation(
+                evaluation
+            )
+
+            # =================================================
+            # RESPONSE
+            # =================================================
 
             response = (
                 self._respond_after_execution(
@@ -318,45 +346,44 @@ class Brain:
                 latest.result
             )
 
-            state.evaluation = (
-                self._evaluate_execution(
-                    history
-                )
-            )
-
-    def _evaluate_execution(
+    def _record_evaluation(
         self,
-        history: list[ExecutionRecord],
-    ) -> str:
+        evaluation: Evaluation,
+    ) -> None:
         """
-        Evaluate the overall execution.
+        Copy structured Evaluator output into AgentState.
 
-        Execution is successful only when every
-        executed step succeeds.
+        AgentState keeps the human-readable reason
+        for compatibility with the existing system.
         """
 
-        if not history:
-            return (
-                "FAILED: no execution occurred."
+        if self.last_state is None:
+            return
+
+        self.last_state.evaluation = (
+            self._format_evaluation(
+                evaluation
             )
-
-        failed_step = next(
-            (
-                record
-                for record in history
-                if not record.success
-            ),
-            None,
         )
 
-        if failed_step is not None:
+    @staticmethod
+    def _format_evaluation(
+        evaluation: Evaluation,
+    ) -> str:
+        """
+        Convert structured evaluation into the
+        existing human-readable state format.
+        """
+
+        if evaluation.success:
             return (
-                f"FAILED: step "
-                f"{failed_step.step} failed."
+                "SUCCESS: "
+                f"{evaluation.reason}"
             )
 
         return (
-            "SUCCESS: all executed steps completed."
+            "FAILED: "
+            f"{evaluation.reason}"
         )
 
     # =====================================================
@@ -450,7 +477,7 @@ unless the user asks.
         """
         Compatibility decision method.
 
-        V5.4 runtime no longer depends on this method.
+        V5.5B runtime no longer depends on this method.
 
         Planner is now the real planning layer.
         """
@@ -654,6 +681,8 @@ For mathematical calculations, use the calculator tool.
     ) -> str:
         """
         Evaluate one individual tool result.
+
+        Legacy compatibility helper.
         """
 
         if result is None:
