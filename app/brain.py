@@ -87,7 +87,7 @@ class Brain:
         decision = self._decide(user_message)
 
         if decision["tool"] is not None:
-            response = self._act_and_observe(
+            response = self._execute_tool(
                 decision["tool"],
                 decision["arguments"],
             )
@@ -221,7 +221,7 @@ Return:
             "arguments": {},
         }
 
-    def _act_and_observe(
+    def _execute_tool(
         self,
         tool_name: str,
         arguments: dict[str, Any],
@@ -233,8 +233,8 @@ Return:
 
         OBSERVE:
 
-        Capture the tool result and give it
-        back to the LLM so NEXUS can respond.
+        Capture the tool result and send it to
+        the LLM for the final response.
         """
 
         tool = self.tools.get(tool_name)
@@ -272,7 +272,7 @@ Return:
         tool_result: Any,
     ) -> str:
         """
-        Convert an observed tool result into
+        Convert the observed tool result into
         a natural final response.
         """
 
@@ -284,17 +284,15 @@ You are NEXUS.
 Conversation:
 {context}
 
-Agent observation:
+A tool was used.
 
-Tool used:
+Tool:
 {tool_name}
 
 Tool result:
 {tool_result}
 
-Use the observation to answer the user's
-original question naturally.
-
+Answer the user's original question naturally.
 Do not mention internal implementation details
 unless the user asks.
 """
