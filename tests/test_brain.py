@@ -10,32 +10,43 @@ from app.tools import CalculatorTool, ToolRegistry
 class FakeLLMClient:
     """
     Fake LLM client used for testing.
+
+    It simulates:
+    - normal LLM responses
+    - tool decisions
+    - final responses after tool execution
     """
 
     def __init__(self) -> None:
         self.calls: list[str] = []
 
     def generate(self, message: str) -> str:
+        """Return a predictable response for tests."""
+
         self.calls.append(message)
 
         # Tool decision request
         if "Return ONLY valid JSON." in message:
-            if "What is 25 * 17?" in message:
+
+            # Only trigger the calculator when the
+            # actual user message is the math question.
+            if "User message:\nWhat is 25 * 17?" in message:
                 return (
                     '{"tool": "calculator", '
                     '"arguments": {"expression": "25 * 17"}}'
                 )
 
+            # No tool required.
             return (
                 '{"tool": null, '
                 '"arguments": {}}'
             )
 
-        # Final response after tool execution
+        # Final response after tool execution.
         if "A tool was used." in message:
             return "The answer is 425."
 
-        # Normal response
+        # Normal response.
         return "Normal NEXUS response."
 
 
@@ -133,6 +144,7 @@ def test_tool_registry() -> None:
 def test_brain_uses_calculator() -> None:
     """
     Brain should:
+
     1. Ask the LLM for a tool decision.
     2. Execute the calculator.
     3. Send the result back to the LLM.
@@ -148,11 +160,14 @@ def test_brain_uses_calculator() -> None:
 
     assert response == "The answer is 425."
 
+    # Verify that the decision engine was called.
     assert any(
         "Return ONLY valid JSON." in call
         for call in fake_client.calls
     )
 
+    # Verify that the calculator result
+    # reached the final LLM call.
     assert any(
         "425" in call
         for call in fake_client.calls
