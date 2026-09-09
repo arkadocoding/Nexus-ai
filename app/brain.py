@@ -1,15 +1,13 @@
 """
 brain.py
 
-The core orchestration logic for NEXUS.
+Core orchestration layer for NEXUS.
 
-V4.4 introduces evaluation.
-
-Agent flow:
+V5.1 architecture:
 
 UNDERSTAND
     ↓
-DECIDE
+PLAN
     ↓
 ACT
     ↓
@@ -20,33 +18,30 @@ EVALUATE
 RESPOND
 """
 
-import json
 from dataclasses import dataclass, field
 from typing import Any
 
 from app.memory import Memory
-from app.tools import ToolRegistry, create_default_registry
+from app.planner import PlanStep, Planner
+from app.tools import (
+    ToolRegistry,
+    create_default_registry,
+)
 
 
 @dataclass
 class AgentState:
-    """
-    Stores the state of one NEXUS agent execution.
-    """
+    """State of one NEXUS execution."""
 
     user_message: str
 
-    decision: dict[str, Any] = field(
-        default_factory=dict
+    plan: list[PlanStep] = field(
+        default_factory=list
     )
 
-    tool_name: str | None = None
-
-    arguments: dict[str, Any] = field(
-        default_factory=dict
+    observations: list[Any] = field(
+        default_factory=list
     )
-
-    observation: Any = None
 
     evaluation: str = ""
 
@@ -54,9 +49,7 @@ class AgentState:
 
 
 class Brain:
-    """
-    The thinking and orchestration layer of NEXUS.
-    """
+    """Thinking and orchestration layer of NEXUS."""
 
     def __init__(
         self,
@@ -64,6 +57,7 @@ class Brain:
         memory: Memory | None = None,
         tool_registry: ToolRegistry | None = None,
     ) -> None:
+
         self.llm_client = llm_client
 
         self.memory = (
@@ -78,15 +72,17 @@ class Brain:
             else create_default_registry()
         )
 
+        self.planner = Planner(
+            llm_client
+        )
+
         self.last_state: AgentState | None = None
 
     def handle_message(
         self,
         user_message: str,
     ) -> str:
-        """
-        Run one NEXUS agent cycle.
-        """
+        """Run one complete NEXUS execution."""
 
         state = AgentState(
             user_message=user_message
@@ -99,27 +95,34 @@ class Brain:
             user_message,
         )
 
-        decision = self._decide(
-            user_message
+        # PLAN
+        state.plan = self.planner.create_plan(
+            user_message,
+            self.tools.list_tools(),
         )
 
-        state.decision = decision
+        # ACT + OBSERVE
+        for step in state.plan:
 
-        state.tool_name = decision["tool"]
+            if step.tool is None:
+                continue
 
-        state.arguments = decision[
-            "arguments"
-        ]
-
-        if decision["tool"] is not None:
-            response = self._execute_tool(
-                decision["tool"],
-                decision["arguments"],
+            result = self._execute_tool(
+                step.tool,
+                step.arguments,
             )
-        else:
-            state.evaluation = "No tool required."
 
-            response = self._generate_response()
+            state.observations.append(
+                result
+            )
+
+        # EVALUATE
+        state.evaluation = (
+            self._evaluate_execution()
+        )
+
+        # RESPOND
+        response = self._generate_final_response()
 
         state.final_response = response
 
@@ -130,168 +133,12 @@ class Brain:
 
         return response
 
-    def _decide(
-        self,
-        user_message: str,
-    ) -> dict[str, Any]:
-        """
-        Decide whether NEXUS should use a tool.
-        """
-
-        tools = self.tools.list_tools()
-
-        tool_descriptions = []
-
-        for tool in tools:
-            tool_descriptions.append(
-                f"- {tool.name}: {tool.description}"
-            )
-
-        prompt = f"""
-You are the decision engine for NEXUS.
-
-Available tools:
-{chr(10).join(tool_descriptions)}
-
-User message:
-{user_message}
-
-Decide whether NEXUS needs a tool.
-
-Return ONLY valid JSON.
-
-If a tool is needed:
-
-{{
-    "tool": "tool_name",
-    "arguments": {{
-        "argument_name": "value"
-    }}
-}}
-
-If no tool is needed:
-
-{{
-    "tool": null,
-    "arguments": {{}}
-}}
-
-For mathematical calculations, use the calculator tool.
-
-Example:
-
-User: What is 25 * 17?
-
-Return:
-
-{{
-    "tool": "calculator",
-    "arguments": {{
-        "expression": "25 * 17"
-    }}
-}}
-"""
-
-        try:
-            raw_decision = self.llm_client.generate(
-                prompt
-            )
-
-            decision = json.loads(
-                raw_decision
-            )
-
-        except (
-            json.JSONDecodeError,
-            TypeError,
-        ):
-            return self._empty_decision()
-
-        return self._validate_decision(
-            decision
-        )
-
-    def _validate_decision(
-        self,
-        decision: Any,
-    ) -> dict[str, Any]:
-        """
-        Validate an LLM-generated tool decision.
-        """
-
-        if not isinstance(
-            decision,
-            dict,
-        ):
-            return self._empty_decision()
-
-        tool_name = decision.get(
-            "tool"
-        )
-
-        arguments = decision.get(
-            "arguments",
-            {},
-        )
-
-        if tool_name is None:
-            return self._empty_decision()
-
-        if not isinstance(
-            tool_name,
-            str,
-        ):
-            return self._empty_decision()
-
-        if not isinstance(
-            arguments,
-            dict,
-        ):
-            return self._empty_decision()
-
-        tool = self.tools.get(
-            tool_name
-        )
-
-        if tool is None:
-            return self._empty_decision()
-
-        return {
-            "tool": tool.name,
-            "arguments": arguments,
-        }
-
-    def _empty_decision(
-        self,
-    ) -> dict[str, Any]:
-        """
-        Return a safe no-tool decision.
-        """
-
-        return {
-            "tool": None,
-            "arguments": {},
-        }
-
     def _execute_tool(
         self,
         tool_name: str,
         arguments: dict[str, Any],
-    ) -> str:
-        """
-        ACT:
-
-        Execute the selected tool.
-
-        OBSERVE:
-
-        Store the tool result.
-
-        EVALUATE:
-
-        Check whether the tool execution
-        produced a usable result.
-        """
+    ) -> Any:
+        """Execute one planned tool."""
 
         tool = self.tools.get(
             tool_name
@@ -299,152 +146,133 @@ Return:
 
         if tool is None:
             return (
-                f"NEXUS does not have a tool named "
-                f"'{tool_name}'."
+                f"Error: unknown tool '{tool_name}'."
             )
 
         try:
-            result = tool.execute(
+            return tool.execute(
                 **arguments
             )
 
         except TypeError as error:
-            result = (
-                "The tool received invalid arguments: "
+            return (
+                "Error: invalid tool arguments: "
                 f"{error}"
             )
 
         except Exception as error:
-            result = (
-                f"Tool execution failed: {error}"
+            return (
+                "Error: tool execution failed: "
+                f"{error}"
             )
 
-        if self.last_state is not None:
-            self.last_state.observation = result
+    def _evaluate_execution(self) -> str:
+        """Evaluate the overall execution."""
 
-            self.last_state.evaluation = (
-                self._evaluate_result(result)
-            )
+        if self.last_state is None:
+            return "FAILED: no execution state."
 
-        return self._respond_after_tool(
-            tool_name,
-            result,
+        observations = (
+            self.last_state.observations
         )
 
-    def _evaluate_result(
-        self,
-        result: Any,
-    ) -> str:
-        """
-        Evaluate a tool result locally.
+        if not observations:
+            return "SUCCESS: direct response required."
 
-        V4.4 intentionally uses simple deterministic
-        evaluation. We will later replace this with
-        an LLM-based evaluator.
-        """
+        for result in observations:
 
-        if result is None:
-            return "FAILED: tool returned no result."
+            if result is None:
+                return (
+                    "FAILED: tool returned no result."
+                )
 
-        if isinstance(result, str):
-            if result.startswith("Error:"):
-                return "FAILED: tool returned an error."
+            if isinstance(result, str):
 
-            if result.startswith(
-                "The tool received invalid arguments:"
-            ):
-                return "FAILED: invalid tool arguments."
+                if result.startswith(
+                    "Error:"
+                ):
+                    return (
+                        "FAILED: at least one "
+                        "tool execution failed."
+                    )
 
-            if result.startswith(
-                "Tool execution failed:"
-            ):
-                return "FAILED: tool execution failed."
+        return (
+            "SUCCESS: all planned tool "
+            "executions completed."
+        )
 
-        return "SUCCESS: usable tool result."
+    def _generate_final_response(self) -> str:
+        """Generate the final response using plan + results."""
 
-    def _respond_after_tool(
-        self,
-        tool_name: str,
-        tool_result: Any,
-    ) -> str:
-        """
-        Convert the observed and evaluated tool
-        result into a natural final response.
-        """
+        if self.last_state is None:
+            return (
+                "NEXUS could not create an execution state."
+            )
+
+        state = self.last_state
+
+        plan_text = "\n".join(
+            f"{index + 1}. {step.description}"
+            for index, step in enumerate(
+                state.plan
+            )
+        )
+
+        observations_text = "\n".join(
+            f"{index + 1}. {result}"
+            for index, result in enumerate(
+                state.observations
+            )
+        )
 
         context = self._build_context()
 
-        evaluation = ""
-
-        if self.last_state is not None:
-            evaluation = self.last_state.evaluation
-
-        final_prompt = f"""
+        prompt = f"""
 You are NEXUS.
+
+User request:
+{state.user_message}
+
+Execution plan:
+{plan_text}
+
+Observed results:
+{observations_text}
+
+Evaluation:
+{state.evaluation}
 
 Conversation:
 {context}
 
-A tool was used.
+Now answer the user's original request.
 
-Tool:
-{tool_name}
+Use the observed results when available.
 
-Tool result:
-{tool_result}
+Do not expose internal planning details
+unless the user specifically asks about them.
 
-Evaluation:
-{evaluation}
-
-Answer the user's original question naturally.
-
-If the tool failed, clearly explain that the
-operation could not be completed.
-
-Do not mention internal implementation details
-unless the user asks.
+Be natural and concise.
 """
 
         try:
             return self.llm_client.generate(
-                final_prompt
+                prompt
             )
 
         except Exception as error:
             return (
-                "The tool worked, but NEXUS could not "
-                "generate the final response: "
+                "NEXUS completed the operation, "
+                "but could not generate the final response: "
                 f"{error}"
             )
 
-    def _generate_response(
-        self,
-    ) -> str:
-        """
-        Generate a normal response without tools.
-        """
+    def _build_context(self) -> str:
+        """Build conversation context."""
 
-        context = self._build_context()
-
-        try:
-            return self.llm_client.generate(
-                context
-            )
-
-        except Exception as error:
-            return (
-                "Something went wrong while talking "
-                f"to the LLM: {error}"
-            )
-
-    def _build_context(
-        self,
-    ) -> str:
-        """
-        Convert conversation history into text.
-        """
-
-        messages = self.memory.get_messages()
+        messages = (
+            self.memory.get_messages()
+        )
 
         if not messages:
             return ""
@@ -452,6 +280,7 @@ unless the user asks.
         lines: list[str] = []
 
         for message in messages:
+
             role = message["role"]
             content = message["content"]
 
@@ -464,7 +293,5 @@ unless the user asks.
                 lines.append(
                     f"NEXUS: {content}"
                 )
-
-        lines.append("NEXUS:")
 
         return "\n".join(lines)
