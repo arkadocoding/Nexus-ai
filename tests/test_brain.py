@@ -1,8 +1,9 @@
 """
-Tests for the NEXUS Brain, Memory, and Tool system.
+Tests for the NEXUS Brain, Memory, Tools,
+and AgentState system.
 """
 
-from app.brain import Brain
+from app.brain import AgentState, Brain
 from app.memory import Memory
 from app.tools import CalculatorTool, ToolRegistry
 
@@ -244,3 +245,63 @@ def test_calculator_handles_division_by_zero() -> None:
     )
 
     assert result == "Error: division by zero."
+
+
+def test_agent_state_defaults() -> None:
+    """AgentState should initialize with safe defaults."""
+
+    state = AgentState(
+        user_message="Hello NEXUS"
+    )
+
+    assert state.user_message == "Hello NEXUS"
+    assert state.decision == {}
+    assert state.tool_name is None
+    assert state.arguments == {}
+    assert state.observation is None
+    assert state.final_response == ""
+
+
+def test_agent_state_tracks_normal_response() -> None:
+    """AgentState should track a normal NEXUS response."""
+
+    fake_client = FakeLLMClient()
+    brain = Brain(llm_client=fake_client)
+
+    response = brain.handle_message(
+        "Hello NEXUS"
+    )
+
+    state = brain.last_state
+
+    assert state is not None
+    assert state.user_message == "Hello NEXUS"
+    assert state.tool_name is None
+    assert state.arguments == {}
+    assert state.observation is None
+    assert state.final_response == response
+
+
+def test_agent_state_tracks_tool_execution() -> None:
+    """AgentState should track tool execution."""
+
+    fake_client = FakeLLMClient()
+    brain = Brain(llm_client=fake_client)
+
+    response = brain.handle_message(
+        "What is 25 * 17?"
+    )
+
+    state = brain.last_state
+
+    assert state is not None
+    assert state.user_message == "What is 25 * 17?"
+
+    assert state.tool_name == "calculator"
+
+    assert state.arguments == {
+        "expression": "25 * 17"
+    }
+
+    assert state.observation == "425"
+    assert state.final_response == response
