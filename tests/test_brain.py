@@ -10,9 +10,6 @@ from app.tools import CalculatorTool, ToolRegistry
 class FakeLLMClient:
     """
     Fake LLM client used for testing.
-
-    It returns a tool decision when the prompt asks
-    for a decision, and a normal response otherwise.
     """
 
     def __init__(self) -> None:
@@ -21,8 +18,9 @@ class FakeLLMClient:
     def generate(self, message: str) -> str:
         self.calls.append(message)
 
-        if "decision engine for NEXUS" in message:
-            if "25 * 17" in message:
+        # Tool decision request
+        if "Return ONLY valid JSON." in message:
+            if "What is 25 * 17?" in message:
                 return (
                     '{"tool": "calculator", '
                     '"arguments": {"expression": "25 * 17"}}'
@@ -33,9 +31,11 @@ class FakeLLMClient:
                 '"arguments": {}}'
             )
 
+        # Final response after tool execution
         if "A tool was used." in message:
             return "The answer is 425."
 
+        # Normal response
         return "Normal NEXUS response."
 
 
@@ -148,13 +148,11 @@ def test_brain_uses_calculator() -> None:
 
     assert response == "The answer is 425."
 
-    # The calculator decision should have happened.
     assert any(
-        "decision engine for NEXUS" in call
+        "Return ONLY valid JSON." in call
         for call in fake_client.calls
     )
 
-    # The tool result should have reached the final LLM call.
     assert any(
         "425" in call
         for call in fake_client.calls
@@ -165,7 +163,6 @@ def test_unknown_tool_is_handled() -> None:
     """Brain should safely handle an unknown tool."""
 
     fake_client = FakeLLMClient()
-
     registry = ToolRegistry()
 
     brain = Brain(
@@ -173,7 +170,6 @@ def test_unknown_tool_is_handled() -> None:
         tool_registry=registry,
     )
 
-    # Directly test the tool execution safety layer.
     result = brain._execute_tool(
         "does_not_exist",
         {},
