@@ -3,7 +3,9 @@ brain.py
 
 The core orchestration logic for NEXUS.
 
-V4 introduces the first agent loop:
+V4.2 introduces AgentState.
+
+Agent flow:
 
 UNDERSTAND
     ↓
@@ -17,10 +19,34 @@ RESPOND
 """
 
 import json
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.memory import Memory
 from app.tools import ToolRegistry, create_default_registry
+
+
+@dataclass
+class AgentState:
+    """
+    Stores the state of one NEXUS agent execution.
+    """
+
+    user_message: str
+
+    decision: dict[str, Any] = field(
+        default_factory=dict
+    )
+
+    tool_name: str | None = None
+
+    arguments: dict[str, Any] = field(
+        default_factory=dict
+    )
+
+    observation: Any = None
+
+    final_response: str = ""
 
 
 class Brain:
@@ -32,7 +58,7 @@ class Brain:
     - LLM communication
     - tool selection
     - tool execution
-    - agent loop
+    - agent state
     """
 
     def __init__(
@@ -55,36 +81,38 @@ class Brain:
             else create_default_registry()
         )
 
-    def handle_message(self, user_message: str) -> str:
+        self.last_state: AgentState | None = None
+
+    def handle_message(
+        self,
+        user_message: str,
+    ) -> str:
         """
         Run one NEXUS agent cycle.
-
-        Flow:
-
-        User
-          ↓
-        UNDERSTAND
-          ↓
-        DECIDE
-          ↓
-        ┌──────────────┐
-        │              │
-        normal        tool
-        │              │
-        ↓              ↓
-      RESPOND        ACT
-                       ↓
-                    OBSERVE
-                       ↓
-                    RESPOND
         """
+
+        state = AgentState(
+            user_message=user_message
+        )
+
+        self.last_state = state
 
         self.memory.add(
             "user",
             user_message,
         )
 
-        decision = self._decide(user_message)
+        decision = self._decide(
+            user_message
+        )
+
+        state.decision = decision
+
+        state.tool_name = decision["tool"]
+
+        state.arguments = decision[
+            "arguments"
+        ]
 
         if decision["tool"] is not None:
             response = self._execute_tool(
@@ -93,6 +121,8 @@ class Brain:
             )
         else:
             response = self._generate_response()
+
+        state.final_response = response
 
         self.memory.add(
             "assistant",
@@ -168,12 +198,19 @@ Return:
                 prompt
             )
 
-            decision = json.loads(raw_decision)
+            decision = json.loads(
+                raw_decision
+            )
 
-        except (json.JSONDecodeError, TypeError):
+        except (
+            json.JSONDecodeError,
+            TypeError,
+        ):
             return self._empty_decision()
 
-        return self._validate_decision(decision)
+        return self._validate_decision(
+            decision
+        )
 
     def _validate_decision(
         self,
@@ -183,10 +220,16 @@ Return:
         Validate an LLM-generated tool decision.
         """
 
-        if not isinstance(decision, dict):
+        if not isinstance(
+            decision,
+            dict,
+        ):
             return self._empty_decision()
 
-        tool_name = decision.get("tool")
+        tool_name = decision.get(
+            "tool"
+        )
+
         arguments = decision.get(
             "arguments",
             {},
@@ -195,13 +238,21 @@ Return:
         if tool_name is None:
             return self._empty_decision()
 
-        if not isinstance(tool_name, str):
+        if not isinstance(
+            tool_name,
+            str,
+        ):
             return self._empty_decision()
 
-        if not isinstance(arguments, dict):
+        if not isinstance(
+            arguments,
+            dict,
+        ):
             return self._empty_decision()
 
-        tool = self.tools.get(tool_name)
+        tool = self.tools.get(
+            tool_name
+        )
 
         if tool is None:
             return self._empty_decision()
@@ -211,7 +262,9 @@ Return:
             "arguments": arguments,
         }
 
-    def _empty_decision(self) -> dict[str, Any]:
+    def _empty_decision(
+        self,
+    ) -> dict[str, Any]:
         """
         Return a safe no-tool decision.
         """
@@ -233,11 +286,13 @@ Return:
 
         OBSERVE:
 
-        Capture the tool result and send it to
-        the LLM for the final response.
+        Store the tool result in the current
+        AgentState and send it to the LLM.
         """
 
-        tool = self.tools.get(tool_name)
+        tool = self.tools.get(
+            tool_name
+        )
 
         if tool is None:
             return (
@@ -260,6 +315,9 @@ Return:
             return (
                 f"Tool execution failed: {error}"
             )
+
+        if self.last_state is not None:
+            self.last_state.observation = result
 
         return self._respond_after_tool(
             tool_name,
@@ -309,7 +367,9 @@ unless the user asks.
                 f"{error}"
             )
 
-    def _generate_response(self) -> str:
+    def _generate_response(
+        self,
+    ) -> str:
         """
         Generate a normal response without tools.
         """
@@ -327,7 +387,9 @@ unless the user asks.
                 f"to the LLM: {error}"
             )
 
-    def _build_context(self) -> str:
+    def _build_context(
+        self,
+    ) -> str:
         """
         Convert conversation history into text.
         """
