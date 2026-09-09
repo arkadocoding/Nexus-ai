@@ -1,6 +1,6 @@
 """
 Tests for the NEXUS Brain, Memory, Tools,
-and AgentState system.
+AgentState, and Evaluation system.
 """
 
 from app.brain import AgentState, Brain
@@ -259,11 +259,12 @@ def test_agent_state_defaults() -> None:
     assert state.tool_name is None
     assert state.arguments == {}
     assert state.observation is None
+    assert state.evaluation == ""
     assert state.final_response == ""
 
 
 def test_agent_state_tracks_normal_response() -> None:
-    """AgentState should track a normal NEXUS response."""
+    """AgentState should track a normal response."""
 
     fake_client = FakeLLMClient()
     brain = Brain(llm_client=fake_client)
@@ -279,6 +280,7 @@ def test_agent_state_tracks_normal_response() -> None:
     assert state.tool_name is None
     assert state.arguments == {}
     assert state.observation is None
+    assert state.evaluation == "No tool required."
     assert state.final_response == response
 
 
@@ -296,7 +298,6 @@ def test_agent_state_tracks_tool_execution() -> None:
 
     assert state is not None
     assert state.user_message == "What is 25 * 17?"
-
     assert state.tool_name == "calculator"
 
     assert state.arguments == {
@@ -304,4 +305,78 @@ def test_agent_state_tracks_tool_execution() -> None:
     }
 
     assert state.observation == "425"
+    assert state.evaluation == (
+        "SUCCESS: usable tool result."
+    )
     assert state.final_response == response
+
+
+def test_evaluation_detects_success() -> None:
+    """Evaluator should recognize a valid result."""
+
+    fake_client = FakeLLMClient()
+    brain = Brain(llm_client=fake_client)
+
+    result = brain._evaluate_result("425")
+
+    assert result == (
+        "SUCCESS: usable tool result."
+    )
+
+
+def test_evaluation_detects_empty_result() -> None:
+    """Evaluator should detect an empty result."""
+
+    fake_client = FakeLLMClient()
+    brain = Brain(llm_client=fake_client)
+
+    result = brain._evaluate_result(None)
+
+    assert result == (
+        "FAILED: tool returned no result."
+    )
+
+
+def test_evaluation_detects_tool_error() -> None:
+    """Evaluator should detect a tool error."""
+
+    fake_client = FakeLLMClient()
+    brain = Brain(llm_client=fake_client)
+
+    result = brain._evaluate_result(
+        "Error: division by zero."
+    )
+
+    assert result == (
+        "FAILED: tool returned an error."
+    )
+
+
+def test_evaluation_detects_invalid_arguments() -> None:
+    """Evaluator should detect invalid arguments."""
+
+    fake_client = FakeLLMClient()
+    brain = Brain(llm_client=fake_client)
+
+    result = brain._evaluate_result(
+        "The tool received invalid arguments: test"
+    )
+
+    assert result == (
+        "FAILED: invalid tool arguments."
+    )
+
+
+def test_evaluation_detects_execution_failure() -> None:
+    """Evaluator should detect execution failure."""
+
+    fake_client = FakeLLMClient()
+    brain = Brain(llm_client=fake_client)
+
+    result = brain._evaluate_result(
+        "Tool execution failed: test"
+    )
+
+    assert result == (
+        "FAILED: tool execution failed."
+    )
