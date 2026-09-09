@@ -1,103 +1,95 @@
 """
 brain.py
 
-This module contains the Brain class: the core orchestration logic for NEXUS.
+The core orchestration logic for NEXUS.
 
-For now, the Brain only does one thing: take a user's message and pass it
-to an LLM client to get a response. Later, this file will grow to include
-the full UNDERSTAND -> DECIDE -> (tool or response) -> VERIFY loop described
-in the NEXUS architecture. The method names below are placeholders that
-show where that logic will eventually go.
+V2 adds conversation memory:
+- User messages are stored.
+- NEXUS responses are stored.
+- Previous conversation is included when generating a response.
 """
 
 from typing import Any
 
+from app.memory import Memory
+
 
 class Brain:
     """
-    The Brain is the "thinking" part of NEXUS.
+    The thinking/orchestration layer of NEXUS.
 
-    It does not know how to call any specific LLM provider itself.
-    Instead, it receives an already-configured LLM client through its
-    constructor. This keeps Brain modular: we can swap LLM providers,
-    add memory, add tools, etc. later without rewriting this class.
+    Brain does not directly know how an LLM provider works.
+    It receives an LLM client and uses Memory to maintain
+    conversation context.
     """
 
-    def __init__(self, llm_client: Any) -> None:
+    def __init__(
+        self,
+        llm_client: Any,
+        memory: Memory | None = None,
+    ) -> None:
         """
         Args:
-            llm_client: An object that knows how to talk to an LLM.
-                It must have a method that Brain can call to get a
-                response for a given message. We keep this generic
-                (typed as Any) for now, since the exact client
-                interface isn't finalized yet.
+            llm_client: Object with a generate(message) method.
+            memory: Optional Memory instance.
 
-                No API keys are stored here - the client is expected
-                to already be configured with whatever credentials it
-                needs before being passed in.
+        If no memory is provided, Brain creates one automatically.
         """
         self.llm_client = llm_client
+        self.memory = memory if memory is not None else Memory()
 
     def handle_message(self, user_message: str) -> str:
         """
-        Main entry point for NEXUS. Takes a raw user message and returns
-        a final response string.
+        Handle one user message.
 
-        Right now this method just sends the message to the LLM and
-        returns whatever comes back. Over time, this is where the full
-        orchestration loop will live:
+        The flow is:
 
-            UNDERSTAND -> DECIDE -> (use tool / generate response) -> VERIFY
-
-        The private helper methods below (_understand, _decide) are
-        placeholders that mark where that future logic will go. They do
-        not do anything meaningful yet - we're not pretending tool use,
-        memory, or planning already exist.
-
-        Args:
-            user_message: The raw text the user typed.
-
-        Returns:
-            The LLM's response as a string, or a readable error message
-            if something went wrong.
+        1. Store the user's message.
+        2. Build context from conversation history.
+        3. Send that context to the LLM.
+        4. Store NEXUS's response.
+        5. Return the response.
         """
-        # Step 1: Understand the message (placeholder for now).
-        understood_message = self._understand(user_message)
 
-        # Step 2: Decide what to do with it (placeholder for now).
-        # In the future, this is where NEXUS will decide whether a tool
-        # is needed. For now, it always chooses to just ask the LLM.
-        self._decide(understood_message)
+        # Store the user's message.
+        self.memory.add("user", user_message)
 
-        # Step 3: Since there is no tool logic yet, we go straight to
-        # generating a response from the LLM.
+        # Build the conversation context.
+        context = self._build_context()
+
+        # Ask the LLM for a response.
         try:
-            response = self.llm_client.generate(understood_message)
+            response = self.llm_client.generate(context)
         except Exception as error:
-            # Catch any error from the LLM call (network issues, bad
-            # responses, etc.) so NEXUS doesn't crash. We return a
-            # readable message instead.
             return f"Something went wrong while talking to the LLM: {error}"
+
+        # Store NEXUS's response.
+        self.memory.add("assistant", response)
 
         return response
 
-    def _understand(self, user_message: str) -> str:
+    def _build_context(self) -> str:
         """
-        Placeholder for the future UNDERSTAND step.
+        Convert stored conversation history into text
+        that can be sent to the LLM.
+        """
 
-        Eventually this might clean up the message, add context from
-        memory, or restructure it for the LLM. For now, it just passes
-        the message through unchanged.
-        """
-        return user_message
+        messages = self.memory.get_messages()
 
-    def _decide(self, understood_message: str) -> None:
-        """
-        Placeholder for the future DECIDE step.
+        if not messages:
+            return ""
 
-        Eventually this will decide whether a tool is needed to answer
-        the message, based on planning logic that doesn't exist yet.
-        For now, it does nothing - NEXUS always just asks the LLM
-        directly.
-        """
-        pass
+        lines = []
+
+        for message in messages:
+            role = message["role"]
+            content = message["content"]
+
+            if role == "user":
+                lines.append(f"User: {content}")
+            elif role == "assistant":
+                lines.append(f"NEXUS: {content}")
+
+        lines.append("NEXUS:")
+
+        return "\n".join(lines)
