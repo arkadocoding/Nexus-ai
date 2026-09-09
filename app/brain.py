@@ -3,7 +3,7 @@ brain.py
 
 The core orchestration logic for NEXUS.
 
-V4.2 introduces AgentState.
+V4.4 introduces evaluation.
 
 Agent flow:
 
@@ -14,6 +14,8 @@ DECIDE
 ACT
     ↓
 OBSERVE
+    ↓
+EVALUATE
     ↓
 RESPOND
 """
@@ -46,19 +48,14 @@ class AgentState:
 
     observation: Any = None
 
+    evaluation: str = ""
+
     final_response: str = ""
 
 
 class Brain:
     """
     The thinking and orchestration layer of NEXUS.
-
-    Brain manages:
-    - conversation memory
-    - LLM communication
-    - tool selection
-    - tool execution
-    - agent state
     """
 
     def __init__(
@@ -120,6 +117,8 @@ class Brain:
                 decision["arguments"],
             )
         else:
+            state.evaluation = "No tool required."
+
             response = self._generate_response()
 
         state.final_response = response
@@ -286,8 +285,12 @@ Return:
 
         OBSERVE:
 
-        Store the tool result in the current
-        AgentState and send it to the LLM.
+        Store the tool result.
+
+        EVALUATE:
+
+        Check whether the tool execution
+        produced a usable result.
         """
 
         tool = self.tools.get(
@@ -306,23 +309,58 @@ Return:
             )
 
         except TypeError as error:
-            return (
+            result = (
                 "The tool received invalid arguments: "
                 f"{error}"
             )
 
         except Exception as error:
-            return (
+            result = (
                 f"Tool execution failed: {error}"
             )
 
         if self.last_state is not None:
             self.last_state.observation = result
 
+            self.last_state.evaluation = (
+                self._evaluate_result(result)
+            )
+
         return self._respond_after_tool(
             tool_name,
             result,
         )
+
+    def _evaluate_result(
+        self,
+        result: Any,
+    ) -> str:
+        """
+        Evaluate a tool result locally.
+
+        V4.4 intentionally uses simple deterministic
+        evaluation. We will later replace this with
+        an LLM-based evaluator.
+        """
+
+        if result is None:
+            return "FAILED: tool returned no result."
+
+        if isinstance(result, str):
+            if result.startswith("Error:"):
+                return "FAILED: tool returned an error."
+
+            if result.startswith(
+                "The tool received invalid arguments:"
+            ):
+                return "FAILED: invalid tool arguments."
+
+            if result.startswith(
+                "Tool execution failed:"
+            ):
+                return "FAILED: tool execution failed."
+
+        return "SUCCESS: usable tool result."
 
     def _respond_after_tool(
         self,
@@ -330,11 +368,16 @@ Return:
         tool_result: Any,
     ) -> str:
         """
-        Convert the observed tool result into
-        a natural final response.
+        Convert the observed and evaluated tool
+        result into a natural final response.
         """
 
         context = self._build_context()
+
+        evaluation = ""
+
+        if self.last_state is not None:
+            evaluation = self.last_state.evaluation
 
         final_prompt = f"""
 You are NEXUS.
@@ -350,7 +393,14 @@ Tool:
 Tool result:
 {tool_result}
 
+Evaluation:
+{evaluation}
+
 Answer the user's original question naturally.
+
+If the tool failed, clearly explain that the
+operation could not be completed.
+
 Do not mention internal implementation details
 unless the user asks.
 """
