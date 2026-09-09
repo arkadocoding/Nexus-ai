@@ -3,7 +3,7 @@ brain.py
 
 The core orchestration logic for NEXUS.
 
-V5.2 introduces real Planner integration.
+V5.4 introduces the real execution architecture.
 
 Flow:
 
@@ -11,31 +11,43 @@ UNDERSTAND
     ↓
 PLAN
     ↓
-ACT
+EXECUTE
     ↓
 OBSERVE
     ↓
 EVALUATE
     ↓
 RESPOND
+
+Brain coordinates the system.
+
+Planner decides WHAT should happen.
+
+Executor carries out the plan.
+
+Tools perform the actual actions.
 """
 
 import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.executor import ExecutionRecord, Executor
 from app.memory import Memory
 from app.planner import Planner
-from app.tools import ToolRegistry, create_default_registry
+from app.tools import (
+    ToolRegistry,
+    create_default_registry,
+)
 
 
 @dataclass
 class AgentState:
     """
-    Stores the state of one NEXUS agent execution.
+    Stores the state of one NEXUS execution.
 
-    V5.2 keeps the existing fields for compatibility
-    and tracks the real execution plan and observations.
+    V5.4 adds execution_history so the Brain can
+    expose what the Executor actually did.
     """
 
     user_message: str
@@ -62,15 +74,30 @@ class AgentState:
 
     evaluation: str = ""
 
+    execution_history: list[
+        dict[str, Any]
+    ] = field(
+        default_factory=list
+    )
+
     final_response: str = ""
 
 
 class Brain:
     """
-    The thinking and orchestration layer of NEXUS.
+    The orchestration layer of NEXUS.
 
-    Brain decides HOW to execute the plan.
-    Planner decides WHAT needs to happen.
+    Brain:
+        Coordinates the complete agent cycle.
+
+    Planner:
+        Decides what should happen.
+
+    Executor:
+        Executes the plan.
+
+    Tools:
+        Perform individual capabilities.
     """
 
     def __init__(
@@ -97,6 +124,10 @@ class Brain:
             llm_client
         )
 
+        self.executor = Executor(
+            self.tools
+        )
+
         self.last_state: AgentState | None = None
 
     def handle_message(
@@ -104,7 +135,19 @@ class Brain:
         user_message: str,
     ) -> str:
         """
-        Run one NEXUS agent cycle.
+        Run one complete NEXUS agent cycle.
+
+        V5.4:
+
+        User
+        ↓
+        Planner
+        ↓
+        Executor
+        ↓
+        Observations
+        ↓
+        Response
         """
 
         state = AgentState(
@@ -118,9 +161,9 @@ class Brain:
             user_message,
         )
 
-        # -------------------------------------------------
+        # =================================================
         # PLAN
-        # -------------------------------------------------
+        # =================================================
 
         plan_steps = self.planner.create_plan(
             user_message,
@@ -140,9 +183,9 @@ class Brain:
             )
         ]
 
-        # -------------------------------------------------
-        # COMPATIBILITY DECISION
-        # -------------------------------------------------
+        # =================================================
+        # DETERMINE COMPATIBILITY DECISION
+        # =================================================
 
         first_tool_step = next(
             (
@@ -154,9 +197,14 @@ class Brain:
         )
 
         if first_tool_step is None:
-            decision = self._empty_decision()
+            # ---------------------------------------------
+            # NO TOOL REQUIRED
+            # ---------------------------------------------
 
-            state.decision = decision
+            state.decision = (
+                self._empty_decision()
+            )
+
             state.tool_name = None
             state.arguments = {}
 
@@ -167,49 +215,55 @@ class Brain:
             response = self._generate_response()
 
         else:
-            decision = {
+            # ---------------------------------------------
+            # TOOL PLAN
+            # ---------------------------------------------
+
+            state.decision = {
                 "tool": first_tool_step.tool,
-                "arguments": first_tool_step.arguments,
+                "arguments": (
+                    first_tool_step.arguments
+                ),
             }
 
-            state.decision = decision
-            state.tool_name = first_tool_step.tool
+            state.tool_name = (
+                first_tool_step.tool
+            )
+
             state.arguments = (
                 first_tool_step.arguments
             )
 
-            # -------------------------------------------------
-            # ACT + OBSERVE + EVALUATE
-            # -------------------------------------------------
+            # =================================================
+            # EXECUTOR
+            # =================================================
+            #
+            # IMPORTANT:
+            #
+            # Brain no longer executes tools itself.
+            #
+            # Executor owns execution.
+            #
 
-            for step in plan_steps:
-                if step.tool is None:
-                    continue
-
-                self._execute_tool_only(
-                    step.tool,
-                    step.arguments,
+            history = (
+                self.executor.execute_plan(
+                    plan_steps
                 )
-
-            # Use the final observation to generate
-            # the final natural-language response.
-
-            final_tool = first_tool_step.tool
-
-            final_result = (
-                state.observations[-1]
-                if state.observations
-                else None
             )
 
-            response = self._respond_after_tool(
-                final_tool,
-                final_result,
+            self._record_execution_history(
+                history
             )
 
-        # -------------------------------------------------
+            response = (
+                self._respond_after_execution(
+                    history
+                )
+            )
+
+        # =================================================
         # FINAL RESPONSE
-        # -------------------------------------------------
+        # =================================================
 
         state.final_response = response
 
@@ -220,60 +274,174 @@ class Brain:
 
         return response
 
-    def _execute_tool_only(
+    # =====================================================
+    # EXECUTION STATE
+    # =====================================================
+
+    def _record_execution_history(
         self,
-        tool_name: str,
-        arguments: dict[str, Any],
-    ) -> Any:
+        history: list[ExecutionRecord],
+    ) -> None:
         """
-        Execute one planned tool step.
+        Copy Executor results into AgentState.
 
-        This method performs:
-
-        ACT
-        ↓
-        OBSERVE
-        ↓
-        EVALUATE
+        This gives Brain visibility into everything
+        the Executor actually did.
         """
 
-        tool = self.tools.get(
-            tool_name
+        if self.last_state is None:
+            return
+
+        state = self.last_state
+
+        state.execution_history = [
+            {
+                "step": record.step,
+                "description": record.description,
+                "tool": record.tool,
+                "arguments": record.arguments,
+                "result": record.result,
+                "success": record.success,
+            }
+            for record in history
+        ]
+
+        state.observations = [
+            record.result
+            for record in history
+        ]
+
+        if history:
+            latest = history[-1]
+
+            state.observation = (
+                latest.result
+            )
+
+            state.evaluation = (
+                self._evaluate_execution(
+                    history
+                )
+            )
+
+    def _evaluate_execution(
+        self,
+        history: list[ExecutionRecord],
+    ) -> str:
+        """
+        Evaluate the overall execution.
+
+        Execution is successful only when every
+        executed step succeeds.
+        """
+
+        if not history:
+            return (
+                "FAILED: no execution occurred."
+            )
+
+        failed_step = next(
+            (
+                record
+                for record in history
+                if not record.success
+            ),
+            None,
         )
 
-        if tool is None:
-            result = (
-                f"NEXUS does not have a tool named "
-                f"'{tool_name}'."
+        if failed_step is not None:
+            return (
+                f"FAILED: step "
+                f"{failed_step.step} failed."
             )
 
-            self._record_observation(
-                result
+        return (
+            "SUCCESS: all executed steps completed."
+        )
+
+    # =====================================================
+    # RESPONSE
+    # =====================================================
+
+    def _respond_after_execution(
+        self,
+        history: list[ExecutionRecord],
+    ) -> str:
+        """
+        Convert the complete execution history
+        into a natural final response.
+        """
+
+        if not history:
+            return (
+                "NEXUS could not execute the plan."
             )
 
-            return result
+        latest = history[-1]
+
+        context = self._build_context()
+
+        execution_history = [
+            {
+                "step": record.step,
+                "tool": record.tool,
+                "arguments": record.arguments,
+                "result": record.result,
+                "success": record.success,
+            }
+            for record in history
+        ]
+
+        evaluation = ""
+
+        if self.last_state is not None:
+            evaluation = (
+                self.last_state.evaluation
+            )
+
+        final_prompt = f"""
+You are NEXUS.
+
+Conversation:
+{context}
+
+A plan was executed.
+
+Execution history:
+{execution_history}
+
+Latest result:
+{latest.result}
+
+Overall evaluation:
+{evaluation}
+
+Answer the user's original request naturally.
+
+Use the execution results to produce the answer.
+
+If execution failed, clearly explain what
+could not be completed.
+
+Do not mention internal implementation details
+unless the user asks.
+"""
 
         try:
-            result = tool.execute(
-                **arguments
-            )
-
-        except TypeError as error:
-            result = (
-                "The tool received invalid arguments: "
-                f"{error}"
+            return self.llm_client.generate(
+                final_prompt
             )
 
         except Exception as error:
-            result = (
-                f"Tool execution failed: {error}"
+            return (
+                "NEXUS completed the execution, "
+                "but could not generate the final response: "
+                f"{error}"
             )
 
-        self._record_observation(
-            result
-        )
-
-        return result
+    # =====================================================
+    # LEGACY DECISION COMPATIBILITY
+    # =====================================================
 
     def _decide(
         self,
@@ -282,9 +450,9 @@ class Brain:
         """
         Compatibility decision method.
 
-        The real planning path is now handled by Planner.
-        This method remains available for existing tests
-        and older code.
+        V5.4 runtime no longer depends on this method.
+
+        Planner is now the real planning layer.
         """
 
         tools = self.tools.list_tools()
@@ -329,8 +497,10 @@ For mathematical calculations, use the calculator tool.
 """
 
         try:
-            raw_decision = self.llm_client.generate(
-                prompt
+            raw_decision = (
+                self.llm_client.generate(
+                    prompt
+                )
             )
 
             decision = json.loads(
@@ -409,19 +579,48 @@ For mathematical calculations, use the calculator tool.
             "arguments": {},
         }
 
+    # =====================================================
+    # LEGACY EXECUTION COMPATIBILITY
+    # =====================================================
+
     def _execute_tool(
         self,
         tool_name: str,
         arguments: dict[str, Any],
     ) -> str:
         """
-        Compatibility wrapper for the existing API.
+        Compatibility method.
+
+        New runtime execution belongs to Executor.
+
+        This method is retained for older code/tests.
         """
 
-        result = self._execute_tool_only(
-            tool_name,
-            arguments,
+        tool = self.tools.get(
+            tool_name
         )
+
+        if tool is None:
+            return (
+                f"NEXUS does not have a tool named "
+                f"'{tool_name}'."
+            )
+
+        try:
+            result = tool.execute(
+                **arguments
+            )
+
+        except TypeError as error:
+            result = (
+                "The tool received invalid arguments: "
+                f"{error}"
+            )
+
+        except Exception as error:
+            result = (
+                f"Tool execution failed: {error}"
+            )
 
         return self._respond_after_tool(
             tool_name,
@@ -433,7 +632,7 @@ For mathematical calculations, use the calculator tool.
         result: Any,
     ) -> None:
         """
-        Store an observation from tool execution.
+        Compatibility observation method.
         """
 
         if self.last_state is None:
@@ -454,7 +653,7 @@ For mathematical calculations, use the calculator tool.
         result: Any,
     ) -> str:
         """
-        Evaluate a tool result locally.
+        Evaluate one individual tool result.
         """
 
         if result is None:
@@ -492,7 +691,7 @@ For mathematical calculations, use the calculator tool.
         tool_result: Any,
     ) -> str:
         """
-        Convert observations into the final response.
+        Compatibility response method.
         """
 
         context = self._build_context()
@@ -504,29 +703,19 @@ For mathematical calculations, use the calculator tool.
                 self.last_state.evaluation
             )
 
-        observations = []
-
-        if self.last_state is not None:
-            observations = (
-                self.last_state.observations
-            )
-
         final_prompt = f"""
 You are NEXUS.
 
 Conversation:
 {context}
 
-A plan was executed.
+A tool was used.
 
 Tool:
 {tool_name}
 
-Latest tool result:
+Tool result:
 {tool_result}
-
-All observations:
-{observations}
 
 Evaluation:
 {evaluation}
@@ -552,11 +741,15 @@ unless the user asks.
                 f"{error}"
             )
 
+    # =====================================================
+    # NORMAL RESPONSE
+    # =====================================================
+
     def _generate_response(
         self,
     ) -> str:
         """
-        Generate a normal response without tools.
+        Generate a response when no tool is needed.
         """
 
         context = self._build_context()
@@ -572,6 +765,10 @@ unless the user asks.
                 f"to the LLM: {error}"
             )
 
+    # =====================================================
+    # MEMORY CONTEXT
+    # =====================================================
+
     def _build_context(
         self,
     ) -> str:
@@ -579,7 +776,9 @@ unless the user asks.
         Convert conversation history into text.
         """
 
-        messages = self.memory.get_messages()
+        messages = (
+            self.memory.get_messages()
+        )
 
         if not messages:
             return ""
