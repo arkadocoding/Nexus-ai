@@ -3,12 +3,14 @@ brain.py
 
 The core orchestration logic for NEXUS.
 
-V3 adds the Tool Registry:
-- NEXUS keeps conversation memory.
-- NEXUS has access to registered tools.
-- Tool selection/execution will be added next.
+V3 adds basic tool decision-making:
+- NEXUS remembers conversations.
+- NEXUS knows which tools are available.
+- NEXUS can decide whether to use a tool.
+- Tool results are sent back to the LLM.
 """
 
+import json
 from typing import Any
 
 from app.memory import Memory
@@ -18,11 +20,6 @@ from app.tools import ToolRegistry, create_default_registry
 class Brain:
     """
     The thinking/orchestration layer of NEXUS.
-
-    Brain manages:
-    - conversation memory
-    - LLM communication
-    - available tools
     """
 
     def __init__(
@@ -31,16 +28,6 @@ class Brain:
         memory: Memory | None = None,
         tool_registry: ToolRegistry | None = None,
     ) -> None:
-        """
-        Args:
-            llm_client: Object with a generate(message) method.
-            memory: Optional Memory instance.
-            tool_registry: Optional ToolRegistry instance.
-
-        If memory or a tool registry is not provided,
-        Brain creates them automatically.
-        """
-
         self.llm_client = llm_client
 
         self.memory = (
@@ -57,48 +44,211 @@ class Brain:
 
     def handle_message(self, user_message: str) -> str:
         """
-        Handle one user message.
+        Handle a user message.
 
-        Current flow:
+        Flow:
 
-        1. Store the user's message.
-        2. Build conversation context.
-        3. Send context to the LLM.
-        4. Store NEXUS's response.
-        5. Return the response.
-
-        Tool selection and execution will be
-        added in the next step.
+        User message
+            ↓
+        Memory
+            ↓
+        Decide
+          ↙   ↘
+       normal  tool
+         ↓      ↓
+        LLM   execute
+                ↓
+               LLM
+                ↓
+             response
         """
 
-        self.memory.add(
-            "user",
-            user_message,
-        )
+        self.memory.add("user", user_message)
+
+        decision = self._decide(user_message)
+
+        if decision["tool"] is not None:
+            response = self._execute_tool(
+                decision["tool"],
+                decision["arguments"],
+            )
+        else:
+            response = self._generate_response()
+
+        self.memory.add("assistant", response)
+
+        return response
+
+    def _decide(self, user_message: str) -> dict[str, Any]:
+        """
+        Ask the LLM whether a tool is required.
+
+        Expected format:
+
+        {
+            "tool": "calculator",
+            "arguments": {
+                "expression": "25 * 17"
+            }
+        }
+
+        Or:
+
+        {
+            "tool": null,
+            "arguments": {}
+        }
+        """
+
+        tools = self.tools.list_tools()
+
+        tool_descriptions = []
+
+        for tool in tools:
+            tool_descriptions.append(
+                f"- {tool.name}: {tool.description}"
+            )
+
+        prompt = f"""
+You are the decision engine for NEXUS.
+
+Available tools:
+{chr(10).join(tool_descriptions)}
+
+User message:
+{user_message}
+
+Decide whether NEXUS needs a tool.
+
+Return ONLY valid JSON.
+
+If a tool is needed:
+{{
+    "tool": "tool_name",
+    "arguments": {{
+        "argument_name": "value"
+    }}
+}}
+
+If no tool is needed:
+{{
+    "tool": null,
+    "arguments": {{}}
+}}
+
+For mathematical calculations, use the calculator tool.
+
+Example:
+
+User: What is 25 * 17?
+
+Return:
+{{
+    "tool": "calculator",
+    "arguments": {{
+        "expression": "25 * 17"
+    }}
+}}
+"""
+
+        try:
+            raw_decision = self.llm_client.generate(
+                prompt
+            )
+
+            decision = json.loads(raw_decision)
+
+            if not isinstance(decision, dict):
+                raise ValueError("Invalid decision format.")
+
+            return {
+                "tool": decision.get("tool"),
+                "arguments": decision.get(
+                    "arguments",
+                    {},
+                ),
+            }
+
+        except Exception:
+            # If the decision cannot be parsed,
+            # safely fall back to a normal response.
+            return {
+                "tool": None,
+                "arguments": {},
+            }
+
+    def _execute_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> str:
+        """
+        Execute the selected tool and use its result
+        to generate the final NEXUS response.
+        """
+
+        tool = self.tools.get(tool_name)
+
+        if tool is None:
+            return (
+                f"NEXUS does not have a tool named "
+                f"'{tool_name}'."
+            )
+
+        try:
+            result = tool.execute(**arguments)
+        except Exception as error:
+            return f"Tool execution failed: {error}"
+
+        context = self._build_context()
+
+        final_prompt = f"""
+You are NEXUS.
+
+Conversation:
+{context}
+
+A tool was used.
+
+Tool:
+{tool_name}
+
+Tool result:
+{result}
+
+Answer the user's original question naturally.
+Do not mention internal implementation details
+unless the user asks.
+"""
+
+        try:
+            return self.llm_client.generate(
+                final_prompt
+            )
+        except Exception as error:
+            return (
+                "The tool worked, but NEXUS could not "
+                f"generate the final response: {error}"
+            )
+
+    def _generate_response(self) -> str:
+        """
+        Generate a normal response without using a tool.
+        """
 
         context = self._build_context()
 
         try:
-            response = self.llm_client.generate(
-                context
-            )
+            return self.llm_client.generate(context)
         except Exception as error:
             return (
-                "Something went wrong while "
-                f"talking to the LLM: {error}"
+                "Something went wrong while talking "
+                f"to the LLM: {error}"
             )
-
-        self.memory.add(
-            "assistant",
-            response,
-        )
-
-        return response
 
     def _build_context(self) -> str:
         """
-        Convert conversation history into text
-        that can be sent to the LLM.
+        Convert conversation history into text.
         """
 
         messages = self.memory.get_messages()
