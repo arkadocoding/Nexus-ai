@@ -3,11 +3,12 @@ brain.py
 
 The core orchestration logic for NEXUS.
 
-V3 adds basic tool decision-making:
-- NEXUS remembers conversations.
-- NEXUS knows which tools are available.
-- NEXUS can decide whether to use a tool.
-- Tool results are sent back to the LLM.
+V3 includes:
+- conversation memory
+- tool registry
+- structured tool decisions
+- decision validation
+- safe tool execution
 """
 
 import json
@@ -20,6 +21,12 @@ from app.tools import ToolRegistry, create_default_registry
 class Brain:
     """
     The thinking/orchestration layer of NEXUS.
+
+    Brain manages:
+    - conversation memory
+    - LLM communication
+    - tool selection
+    - tool execution
     """
 
     def __init__(
@@ -44,26 +51,29 @@ class Brain:
 
     def handle_message(self, user_message: str) -> str:
         """
-        Handle a user message.
+        Handle one user message.
 
         Flow:
 
-        User message
-            ↓
+        User
+          ↓
         Memory
-            ↓
+          ↓
         Decide
-          ↙   ↘
-       normal  tool
-         ↓      ↓
-        LLM   execute
-                ↓
-               LLM
-                ↓
-             response
+        ↙     ↘
+      normal  tool
+        ↓      ↓
+       LLM   execute
+              ↓
+             LLM
+              ↓
+           response
         """
 
-        self.memory.add("user", user_message)
+        self.memory.add(
+            "user",
+            user_message,
+        )
 
         decision = self._decide(user_message)
 
@@ -75,29 +85,22 @@ class Brain:
         else:
             response = self._generate_response()
 
-        self.memory.add("assistant", response)
+        self.memory.add(
+            "assistant",
+            response,
+        )
 
         return response
 
-    def _decide(self, user_message: str) -> dict[str, Any]:
+    def _decide(
+        self,
+        user_message: str,
+    ) -> dict[str, Any]:
         """
         Ask the LLM whether a tool is required.
 
-        Expected format:
-
-        {
-            "tool": "calculator",
-            "arguments": {
-                "expression": "25 * 17"
-            }
-        }
-
-        Or:
-
-        {
-            "tool": null,
-            "arguments": {}
-        }
+        The decision is validated before it can
+        reach the tool execution layer.
         """
 
         tools = self.tools.list_tools()
@@ -139,7 +142,6 @@ If no tool is needed:
 For mathematical calculations, use the calculator tool.
 
 Example:
-
 User: What is 25 * 17?
 
 Return:
@@ -158,24 +160,61 @@ Return:
 
             decision = json.loads(raw_decision)
 
-            if not isinstance(decision, dict):
-                raise ValueError("Invalid decision format.")
+        except (json.JSONDecodeError, TypeError):
+            return self._empty_decision()
 
-            return {
-                "tool": decision.get("tool"),
-                "arguments": decision.get(
-                    "arguments",
-                    {},
-                ),
-            }
+        return self._validate_decision(decision)
 
-        except Exception:
-            # If the decision cannot be parsed,
-            # safely fall back to a normal response.
-            return {
-                "tool": None,
-                "arguments": {},
-            }
+    def _validate_decision(
+        self,
+        decision: Any,
+    ) -> dict[str, Any]:
+        """
+        Validate an LLM-generated tool decision.
+
+        Invalid decisions safely become a normal
+        response instead of reaching tool execution.
+        """
+
+        if not isinstance(decision, dict):
+            return self._empty_decision()
+
+        tool_name = decision.get("tool")
+        arguments = decision.get("arguments", {})
+
+        # No tool requested.
+        if tool_name is None:
+            return self._empty_decision()
+
+        # Tool name must be a string.
+        if not isinstance(tool_name, str):
+            return self._empty_decision()
+
+        # Arguments must be a dictionary.
+        if not isinstance(arguments, dict):
+            return self._empty_decision()
+
+        # Tool must actually exist.
+        tool = self.tools.get(tool_name)
+
+        if tool is None:
+            return self._empty_decision()
+
+        return {
+            "tool": tool.name,
+            "arguments": arguments,
+        }
+
+    def _empty_decision(self) -> dict[str, Any]:
+        """
+        Return a safe decision meaning:
+        no tool should be used.
+        """
+
+        return {
+            "tool": None,
+            "arguments": {},
+        }
 
     def _execute_tool(
         self,
@@ -183,8 +222,8 @@ Return:
         arguments: dict[str, Any],
     ) -> str:
         """
-        Execute the selected tool and use its result
-        to generate the final NEXUS response.
+        Execute a validated tool and send its result
+        back to the LLM.
         """
 
         tool = self.tools.get(tool_name)
@@ -197,8 +236,17 @@ Return:
 
         try:
             result = tool.execute(**arguments)
+
+        except TypeError as error:
+            return (
+                "The tool received invalid arguments: "
+                f"{error}"
+            )
+
         except Exception as error:
-            return f"Tool execution failed: {error}"
+            return (
+                f"Tool execution failed: {error}"
+            )
 
         context = self._build_context()
 
@@ -225,21 +273,26 @@ unless the user asks.
             return self.llm_client.generate(
                 final_prompt
             )
+
         except Exception as error:
             return (
                 "The tool worked, but NEXUS could not "
-                f"generate the final response: {error}"
+                "generate the final response: "
+                f"{error}"
             )
 
     def _generate_response(self) -> str:
         """
-        Generate a normal response without using a tool.
+        Generate a normal response without a tool.
         """
 
         context = self._build_context()
 
         try:
-            return self.llm_client.generate(context)
+            return self.llm_client.generate(
+                context
+            )
+
         except Exception as error:
             return (
                 "Something went wrong while talking "
