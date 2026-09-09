@@ -3,74 +3,101 @@ brain.py
 
 The core orchestration logic for NEXUS.
 
-V2 adds conversation memory:
-- User messages are stored.
-- NEXUS responses are stored.
-- Previous conversation is included when generating a response.
+V3 adds the Tool Registry:
+- NEXUS keeps conversation memory.
+- NEXUS has access to registered tools.
+- Tool selection/execution will be added next.
 """
 
 from typing import Any
 
 from app.memory import Memory
+from app.tools import ToolRegistry, create_default_registry
 
 
 class Brain:
     """
     The thinking/orchestration layer of NEXUS.
 
-    Brain does not directly know how an LLM provider works.
-    It receives an LLM client and uses Memory to maintain
-    conversation context.
+    Brain manages:
+    - conversation memory
+    - LLM communication
+    - available tools
     """
 
     def __init__(
         self,
         llm_client: Any,
         memory: Memory | None = None,
+        tool_registry: ToolRegistry | None = None,
     ) -> None:
         """
         Args:
             llm_client: Object with a generate(message) method.
             memory: Optional Memory instance.
+            tool_registry: Optional ToolRegistry instance.
 
-        If no memory is provided, Brain creates one automatically.
+        If memory or a tool registry is not provided,
+        Brain creates them automatically.
         """
+
         self.llm_client = llm_client
-        self.memory = memory if memory is not None else Memory()
+
+        self.memory = (
+            memory
+            if memory is not None
+            else Memory()
+        )
+
+        self.tools = (
+            tool_registry
+            if tool_registry is not None
+            else create_default_registry()
+        )
 
     def handle_message(self, user_message: str) -> str:
         """
         Handle one user message.
 
-        The flow is:
+        Current flow:
 
         1. Store the user's message.
-        2. Build context from conversation history.
-        3. Send that context to the LLM.
+        2. Build conversation context.
+        3. Send context to the LLM.
         4. Store NEXUS's response.
         5. Return the response.
+
+        Tool selection and execution will be
+        added in the next step.
         """
 
-        # Store the user's message.
-        self.memory.add("user", user_message)
+        self.memory.add(
+            "user",
+            user_message,
+        )
 
-        # Build the conversation context.
         context = self._build_context()
 
-        # Ask the LLM for a response.
         try:
-            response = self.llm_client.generate(context)
+            response = self.llm_client.generate(
+                context
+            )
         except Exception as error:
-            return f"Something went wrong while talking to the LLM: {error}"
+            return (
+                "Something went wrong while "
+                f"talking to the LLM: {error}"
+            )
 
-        # Store NEXUS's response.
-        self.memory.add("assistant", response)
+        self.memory.add(
+            "assistant",
+            response,
+        )
 
         return response
 
     def _build_context(self) -> str:
         """
-        Convert stored conversation history into text
+        Convert conversation history into text
         that can be sent to the LLM.
         """
 
@@ -79,16 +106,21 @@ class Brain:
         if not messages:
             return ""
 
-        lines = []
+        lines: list[str] = []
 
         for message in messages:
             role = message["role"]
             content = message["content"]
 
             if role == "user":
-                lines.append(f"User: {content}")
+                lines.append(
+                    f"User: {content}"
+                )
+
             elif role == "assistant":
-                lines.append(f"NEXUS: {content}")
+                lines.append(
+                    f"NEXUS: {content}"
+                )
 
         lines.append("NEXUS:")
 
